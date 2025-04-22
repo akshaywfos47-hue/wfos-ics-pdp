@@ -29,7 +29,8 @@ import scala.concurrent.{ExecutionContextExecutor, Future}
 import wfos.lgriphcd.LgripInfo
 import wfos.rgriphcd.RgripInfo
 import wfos.lgmhcd.LgmInfo
-import wfos.bgrxassembly.components.{RgripHcd, LgripHcd, Lgmhcd}
+import wfos.pacthcd.PactInfo
+import wfos.bgrxassembly.components.{RgripHcd, LgripHcd, Lgmhcd} //Make sure to import Pacthcd..
 import csw.params.events.{EventKey, EventName}
 
 import akka.util.Timeout
@@ -56,6 +57,7 @@ class BgrxassemblyHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswC
   private var rgripHcdCS: Option[CommandService] = None
   private var lgripHcdCS: Option[CommandService] = None
   private var lgmHcdCS: Option[CommandService]   = None
+  private var pactHcdCS: Option[CommandService]  = None
 
   private val rgripHcd: RgripHcd = new RgripHcd()
   // private val lgmHcd: LgmHcd     = new LgmHcd()
@@ -68,11 +70,11 @@ class BgrxassemblyHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswC
 
   override def initialize(): Unit = {
     log.info("Initializing BgrxAssembly")
-<<<<<<< HEAD
-    // log.info(s"Printing lgminfo var ${LgmInfo.exchangeAngle}")
-=======
+    // <<<<<<< HEAD
+    // // log.info(s"Printing lgminfo var ${LgmInfo.exchangeAngle}")
+    // =======
 
->>>>>>> upstream/phase3
+    // >>>>>>> upstream / phase3
   }
 
   override def onLocationTrackingEvent(trackingEvent: TrackingEvent): Unit = { // no need to create CS here
@@ -95,12 +97,18 @@ class BgrxassemblyHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswC
             log.info("Bgrx Assembly : Creating command service to Lgmhcd")
             lgmHcdCS = Some(CommandServiceFactory.make(location))
           }
+
+          case AkkaConnection(ComponentId(Prefix(Subsystem.WFOS, "bgrxAssembly.pacthcd"), _)) => {
+            log.info("Bgrx Assembly : Creating command service to Pacthcd")
+            pactHcdCS = Some(CommandServiceFactory.make(location))
+          }
+
           case _ => log.info("Unknown HCD encountered")
         }
       }
       case LocationRemoved(connection) => log.info("Location Removed")
     }
-    if (rgripHcdCS != None && lgripHcdCS != None && lgmHcdCS != None) {
+    if (rgripHcdCS != None && lgripHcdCS != None && lgmHcdCS != None && pactHcdCS != None) {
       log.info("Bgrx Assembly : All HCDs are successfully initialized")
       sendCommand(Id("bgrx"))
     }
@@ -173,6 +181,7 @@ class BgrxassemblyHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswC
     val gripperMovementEventKey = EventKey(Prefix("wfos.bgrxAssembly.lgriphcd"), EventName("LgripMovementEvent"))
     val rgripRotationEventKey   = EventKey(Prefix("wfos.bgrxAssembly.rgriphcd"), EventName("RgripRotationEvent"))
     val lgmMovementEventKey     = EventKey(Prefix("wfos.bgrxAssembly.lgmhcd"), EventName("LgmMovementEvent"))
+    val pactMovementEventKey    = EventKey(Prefix("wfos.bgrxAssembly.pacthcd"), EventName("PactMovementEvent"))
 
     val subscriber = eventService.defaultSubscriber
     subscriber.subscribeCallback(
@@ -195,6 +204,16 @@ class BgrxassemblyHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswC
       event => {
         log.info(s"Received LgmMovement Event: Lgmhcd: Moving grating magazine to${LgmInfo.currentPosition.head}")
         // Handle the RgripRotationEvent here
+      }
+    )
+
+    subscriber.subscribeCallback(
+      Set(pactMovementEventKey),
+      event => {
+        // log.info(s"Received PactMovement Event: Pacthcd: Moving rod to${PactInfo.out.head}")
+        // Handle the RgripRotationEvent here
+        // log.info(s"Recieved PactMovement Event - First log");
+        log.info(s"Received PactMovement Event: Pacthcd: Moving rod to ${PactInfo.currentPosition.head}")
       }
     )
 
@@ -296,6 +315,7 @@ class BgrxassemblyHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswC
             log.info(s"Bgrx Assembly: LgripHcd has moved to exchange position successfully")
             log.info(s"Bgrx Assembly: Execution of command with runId - $runId is completed successfully")
             commandResponseManager.updateCommand(completed.withRunId(runId))
+            movePactHcd(runId);
           }
 
           case error: Invalid => {
@@ -303,6 +323,7 @@ class BgrxassemblyHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswC
             log.error(s"Bgrx Assembly: ${error.issue}")
             commandResponseManager.updateCommand(error.withRunId(runId))
           }
+          // pacthcd (SupervisorBehavior.scala 352) - Starting InitializeTimer for 10 second
           case other => commandResponseManager.updateCommand(other.withRunId(runId))
         }
       }
@@ -310,6 +331,40 @@ class BgrxassemblyHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswC
         log.error("Bgrx Assembly : Lgm Hcd is not available. Failed to create an instance of command service to Lgm Hcd")
         commandResponseManager.updateCommand(Invalid(runId, RequiredHCDUnavailableIssue("Lgm Hcd is not available")))
       }
+    }
+  }
+
+  private def movePactHcd(runId: Id): Unit = {
+    val targetPosition = PactInfo.targetPositionKey.set(500.0)
+
+    val command: Setup = Setup(sourcePrefix, CommandName("move"), Some(obsId)).madd(targetPosition)
+
+    val connection   = AkkaConnection(ComponentId(Prefix("wfos.bgrxAssembly.pacthcd"), ComponentType.HCD))
+    val akkaLocation = Await.result(locationService.resolve(connection, 10.seconds), 10.seconds).get
+
+    pactHcdCS = Some(CommandServiceFactory.make(akkaLocation))
+
+    pactHcdCS match {
+      case Some(cs) =>
+        val response: Future[SubmitResponse] = cs.submit(command)
+        response.foreach {
+          case completed: Completed =>
+            log.info(s"Bgrx Assembly: PactHcd has moved to target position successfully")
+            log.info(s"Bgrx Assembly: Execution of command with runId - $runId is completed successfully")
+            commandResponseManager.updateCommand(completed.withRunId(runId))
+
+          case error: Invalid =>
+            log.error(s"Bgrx Assembly: Execution of command with runId- $runId has failed")
+            log.error(s"Bgrx Assembly: ${error.issue}")
+            commandResponseManager.updateCommand(error.withRunId(runId))
+
+          case other =>
+            commandResponseManager.updateCommand(other.withRunId(runId))
+        }
+
+      case None =>
+        log.error("Bgrx Assembly : Pact Hcd is not available. Failed to create an instance of command service to Pact Hcd")
+        commandResponseManager.updateCommand(Invalid(runId, RequiredHCDUnavailableIssue("Pact Hcd is not available")))
     }
   }
 
@@ -324,5 +379,4 @@ class BgrxassemblyHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswC
   override def onDiagnosticMode(startTime: UTCTime, hint: String): Unit = {}
 
   override def onOperationsMode(): Unit = {}
-
 }
