@@ -16,7 +16,7 @@ lazy val `wfos-bgrxassembly` = project
   .dependsOn(
     `wfos-bgrx-lgripHcd`,
     `wfos-bgrx-rgripHcd`,
-    `wfos-bgrx-lgmhcd`,
+    `wfos-bgrx-lgmhcd`
     
   )
   .settings(
@@ -26,7 +26,11 @@ lazy val `wfos-bgrxassembly` = project
 // hcd module
 lazy val `wfos-bgrx-lgripHcd` = project
   .settings(
-    libraryDependencies ++= Dependencies.lgripHcd
+    libraryDependencies ++= Dependencies.lgripHcd ++ Seq(
+      "com.github.tmtsoftware.csw" %% "csw-config-client" % "5.0.1",
+      "com.github.tmtsoftware.csw" %% "csw-location-client" % "5.0.1",
+      "com.github.tmtsoftware.csw" %% "csw-config-api" % "5.0.1"
+    )
   )
 
   // hcd module
