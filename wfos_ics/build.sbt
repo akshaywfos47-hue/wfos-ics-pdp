@@ -30,7 +30,11 @@ lazy val `wfos-bgrxassembly` = project
 // HCD module - Left Gripper
 lazy val `wfos-bgrx-lgripHcd` = project
   .settings(
-    libraryDependencies ++= Dependencies.lgripHcd
+    libraryDependencies ++= Dependencies.lgripHcd ++ Seq(
+      "com.github.tmtsoftware.csw" %% "csw-config-client" % "5.0.1",
+      "com.github.tmtsoftware.csw" %% "csw-location-client" % "5.0.1",
+      "com.github.tmtsoftware.csw" %% "csw-config-api" % "5.0.1"
+    )
   )
 
 // HCD module - Right Gripper
