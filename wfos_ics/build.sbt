@@ -1,4 +1,7 @@
 // Define aggregated projects
+ThisBuild / scalaVersion := Libs.ScalaVersion
+ThisBuild / scalafmtOnCompile := true
+
 lazy val aggregatedProjects: Seq[ProjectReference] = Seq(
   `wfos-bgrxassembly`,
   `wfos-bgrx-lgripHcd`,
@@ -31,9 +34,9 @@ lazy val `wfos-bgrxassembly` = project
 lazy val `wfos-bgrx-lgripHcd` = project
   .settings(
     libraryDependencies ++= Dependencies.lgripHcd ++ Seq(
-      "com.github.tmtsoftware.csw" %% "csw-config-client" % "5.0.1",
-      "com.github.tmtsoftware.csw" %% "csw-location-client" % "5.0.1",
-      "com.github.tmtsoftware.csw" %% "csw-config-api" % "5.0.1"
+      "com.github.tmtsoftware.csw" %% "csw-config-client" % "6.0.0",
+      "com.github.tmtsoftware.csw" %% "csw-location-client" % "6.0.0",
+      "com.github.tmtsoftware.csw" %% "csw-config-api" % "6.0.0"
     )
   )
 

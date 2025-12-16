@@ -1,7 +1,7 @@
 package wfos.rgriphcd
 
-import akka.Done
-import akka.actor.typed.scaladsl.ActorContext
+import org.apache.pekko.Done
+import org.apache.pekko.actor.typed.scaladsl.ActorContext
 import csw.command.client.messages.TopLevelActorMessage
 import csw.framework.models.CswContext
 import csw.framework.scaladsl.ComponentHandlers
@@ -97,6 +97,10 @@ class RgriphcdHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswConte
         }
       }
       case _: Observe => Invalid(runId, WrongCommandTypeIssue("RgripHcd accepts only setup commands"))
+      case other =>
+        log.warn(s"Invalid command received: $other")
+        Invalid(runId, UnsupportedCommandIssue("Unsupported command"))
+
     }
   }
 

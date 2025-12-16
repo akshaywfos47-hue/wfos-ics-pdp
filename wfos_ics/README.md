@@ -42,8 +42,7 @@ Run the container cmd script with arguments. For example:
 * Run the lgripHCD in a standalone mode with a local config file (The standalone config format is different than the container format):
 
 ```
-sbt "wfos-wfos-icsdeploy/runMain wfos.wfosicsdeploy.WfosIcsContainerCmdApp --local ./src/main/resources/LgripHcdStandalone.conf"
-```
+c```
 * Run the rgripHCD in a standalone mode with a local config file (The standalone config format is different than the container format):
 
 ```

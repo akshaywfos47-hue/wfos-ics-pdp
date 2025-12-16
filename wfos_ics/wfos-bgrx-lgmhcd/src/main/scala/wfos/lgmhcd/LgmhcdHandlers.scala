@@ -1,6 +1,6 @@
 package wfos.lgmhcd
 
-import akka.actor.typed.scaladsl.ActorContext
+import org.apache.pekko.actor.typed.scaladsl.ActorContext
 import csw.command.client.messages.TopLevelActorMessage
 import csw.framework.models.CswContext
 import csw.framework.scaladsl.ComponentHandlers
@@ -70,6 +70,9 @@ class LgmhcdHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswContext
 
       }
       case _: Observe => Invalid(runId, WrongCommandTypeIssue("LgmHcd accepts only setup commands"))
+      case _ =>
+        Invalid(runId, UnsupportedCommandIssue("LgmHcd: Invalid command type"))
+
     }
   }
 

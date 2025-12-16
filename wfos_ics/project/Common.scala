@@ -16,13 +16,14 @@ object Common extends AutoPlugin {
     organizationHomepage := Some(url("http://www.tmt.org")),
 
     scalacOptions ++= Seq(
-      "-encoding",
-      "UTF-8",
+      "-encoding", "UTF-8",
       "-feature",
       "-unchecked",
       "-deprecation",
-      "-Xlint",
-      "-Ywarn-dead-code"
+      "-Wunused:all",          // replaces -Xlint
+      "-Wdead-code",           // replaces -Ywarn-dead-code
+      "-Wvalue-discard",       // new in Scala 3
+      "-Wconf:any:warning"
     ),
     Compile / doc / javacOptions ++= Seq("-Xdoclint:none"),
     Test / testOptions ++= Seq(

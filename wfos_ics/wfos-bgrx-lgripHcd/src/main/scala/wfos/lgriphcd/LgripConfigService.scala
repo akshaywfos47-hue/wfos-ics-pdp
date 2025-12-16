@@ -1,11 +1,14 @@
 package wfos.lgriphcd
 
-import akka.actor.typed.ActorSystem
-import akka.actor.typed.scaladsl.Behaviors
+import scala.util.{Failure, Success}
+import org.apache.pekko.actor.typed.ActorSystem
+import org.apache.pekko.actor.typed.scaladsl.Behaviors
 import csw.config.api.scaladsl.{ConfigClientService, ConfigService}
 import csw.config.client.scaladsl.ConfigClientFactory
 import csw.config.api.{ConfigData, TokenFactory}
-import com.typesafe.config.{Config, ConfigFactory}
+import com.typesafe.config.ConfigFactory
+import com.typesafe.config.Config
+import scala.concurrent.ExecutionContext.Implicits.global
 import java.nio.file.Paths
 import scala.concurrent.{ExecutionContextExecutor, Future}
 
@@ -18,7 +21,9 @@ object LgripConfigService {
   private val locationService = csw.location.client.scaladsl.HttpLocationServiceFactory.makeLocalClient(actorSystem)
 
   // Create TokenFactory instance
-  private val tokenFactory = TokenFactory()
+  private val tokenFactory: TokenFactory = new TokenFactory {
+    override def getToken: String = ""
+  }
 
   // Client API and Admin API
   private val clientApi: ConfigClientService = ConfigClientFactory.clientApi(actorSystem, locationService)

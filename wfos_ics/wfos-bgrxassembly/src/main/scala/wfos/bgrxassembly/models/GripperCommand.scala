@@ -1,6 +1,6 @@
 package wfos.bgrxassembly.models
 
-import akka.actor.typed.ActorRef
+import org.apache.pekko.actor.typed.ActorRef
 import csw.params.commands.CommandResponse.ValidateCommandResponse
 import csw.params.core.models.Id
 
