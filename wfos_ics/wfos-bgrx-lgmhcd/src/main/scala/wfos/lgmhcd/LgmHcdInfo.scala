@@ -27,10 +27,10 @@ object LgmInfo {
   val gratingMapKey: Key[ArrayData[Int]] = KeyType.IntArrayKey.make("gratingMap")
 
   // target position
-  val targetGratingPositionKey: Key[Double] = KeyType.DoubleKey.make("targerGratingPosition")
+  val targetGratingPositionKey: Key[Double] = KeyType.DoubleKey.make("targetGratingPosition")
 
   // ranges of targetPosition
-  val minTargetGratingKey: Key[Double]    = KeyType.DoubleKey.make("minTargetGratingPositon")
+  val minTargetGratingKey: Key[Double]    = KeyType.DoubleKey.make("minTargetGratingPosition")
   val minTargetGrating: Parameter[Double] = minTargetGratingKey.set(0)
 
   val maxTargetGratingKey: Key[Double]    = KeyType.DoubleKey.make("maxTargetGratingPosition")

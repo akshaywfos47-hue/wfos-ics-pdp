@@ -21,8 +21,9 @@ object Common extends AutoPlugin {
       "-feature",
       "-unchecked",
       "-deprecation",
-      "-Xlint",
-      "-Ywarn-dead-code"
+      "-Wunused:all",
+      "-Wvalue-discard",
+      "-Wconf:any:warning"
     ),
     Compile / doc / javacOptions ++= Seq("-Xdoclint:none"),
     Test / testOptions ++= Seq(

@@ -1,7 +1,21 @@
+# ===== Compiled / Build output =====
+target/
+**/target/
+**/project/target/
+**/project/project/
+
+# ===== Class & Logs =====
 *.class
 *.log
-target/
-.idea
-**/src/main/java/
-**/src/test/java/
-.bsp
+
+# ===== IDE files =====
+.idea/
+*.iml
+.bsp/
+.bloop/
+.metals/
+.vscode/
+
+# ===== OS files =====
+.DS_Store
+Thumbs.db

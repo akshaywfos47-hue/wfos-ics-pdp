@@ -2,7 +2,7 @@ package wfos.bgrxassembly
 
 //import akka.actor.Status.Success
 import csw.command.client.CommandServiceFactory
-import csw.location.api.models.Connection.AkkaConnection
+import csw.location.api.models.Connection.PekkoConnection
 import csw.prefix.models.Prefix
 import csw.location.api.models.{ComponentId, ComponentType}
 
@@ -37,29 +37,29 @@ class WfosContainerTest extends ScalaTestFrameworkTestKit(LocationServer, EventS
   }
 
   test("All components in the container should be locatable using Location Service") {
-    val connection   = AkkaConnection(ComponentId(Prefix("wfos.bgrxAssembly"), ComponentType.Assembly))
-    val akkaLocation = Await.result(locationService.resolve(connection, 10.seconds), 10.seconds).get
+    val connection    = PekkoConnection(ComponentId(Prefix("wfos.bgrxAssembly"), ComponentType.Assembly))
+    val pekkoLocation = Await.result(locationService.resolve(connection, 10.seconds), 10.seconds).get
 
-    val rConnection   = AkkaConnection(ComponentId(Prefix("wfos.bgrxAssembly.rgriphcd"), ComponentType.HCD))
-    val rAkkaLocation = Await.result(locationService.resolve(rConnection, 10.seconds), 10.seconds).get
+    val rConnection    = PekkoConnection(ComponentId(Prefix("wfos.bgrxAssembly.rgriphcd"), ComponentType.HCD))
+    val rPekkoLocation = Await.result(locationService.resolve(rConnection, 10.seconds), 10.seconds).get
 
-    val lConnection   = AkkaConnection(ComponentId(Prefix("wfos.bgrxAssembly.lgriphcd"), ComponentType.HCD))
-    val lAkkaLocation = Await.result(locationService.resolve(lConnection, 10.seconds), 10.seconds).get
+    val lConnection    = PekkoConnection(ComponentId(Prefix("wfos.bgrxAssembly.lgriphcd"), ComponentType.HCD))
+    val lPekkoLocation = Await.result(locationService.resolve(lConnection, 10.seconds), 10.seconds).get
 
-    akkaLocation.connection shouldBe connection
-    rAkkaLocation.connection shouldBe rConnection
-    lAkkaLocation.connection shouldBe lConnection
+    pekkoLocation.connection shouldBe connection
+    rPekkoLocation.connection shouldBe rConnection
+    lPekkoLocation.connection shouldBe lConnection
   }
 
   test("Assembly should be able to accept Setup commands of move type and execute them successfully") {
-    val connection   = AkkaConnection(ComponentId(Prefix("wfos.bgrxAssembly"), ComponentType.Assembly))
-    val akkaLocation = Await.result(locationService.resolve(connection, 10.seconds), 10.seconds).get
+    val connection    = PekkoConnection(ComponentId(Prefix("wfos.bgrxAssembly"), ComponentType.Assembly))
+    val pekkoLocation = Await.result(locationService.resolve(connection, 10.seconds), 10.seconds).get
 
     val targetAngle: Parameter[Int]    = RgripInfo.targetAngleKey.set(30)
     val gratingMode: Parameter[String] = RgripInfo.gratingModeKey.set("bgid3")
     val cw: Parameter[Int]             = RgripInfo.cwKey.set(6000)
 
-    val bgrxCS         = CommandServiceFactory.make(akkaLocation)
+    val bgrxCS         = CommandServiceFactory.make(pekkoLocation)
     val command: Setup = Setup(Prefix("wfos.bgrxAssembly"), CommandName("move"), Some(RgripInfo.obsId)).madd(targetAngle, gratingMode, cw)
 
     // val response = bgrxCS.submit(command)

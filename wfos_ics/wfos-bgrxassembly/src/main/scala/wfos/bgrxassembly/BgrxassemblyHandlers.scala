@@ -1,9 +1,9 @@
 package wfos.bgrxassembly
 
-import akka.Done
-import akka.actor.typed.ActorSystem
+import org.apache.pekko.Done
+import org.apache.pekko.actor.typed.ActorSystem
 import com.typesafe.config._
-import akka.actor.typed.scaladsl.ActorContext
+import org.apache.pekko.actor.typed.scaladsl.ActorContext
 import csw.command.client.messages.TopLevelActorMessage
 import csw.framework.models.CswContext
 import csw.framework.scaladsl.ComponentHandlers
@@ -17,7 +17,7 @@ import csw.time.core.models.UTCTime
 import csw.params.core.models.{Id, ObsId}
 
 import csw.location.api.models.{ComponentId, ComponentType, LocationRemoved, LocationUpdated, TrackingEvent}
-import csw.location.api.models.Connection.AkkaConnection
+import csw.location.api.models.Connection.PekkoConnection
 import csw.command.api.scaladsl.CommandService
 import csw.command.client.CommandServiceFactory
 import csw.prefix.models.{Prefix, Subsystem}
@@ -33,7 +33,7 @@ import wfos.pacthcd.PactInfo
 import wfos.bgrxassembly.components.{RgripHcd, LgripHcd, Lgmhcd} //Make sure to import Pacthcd..
 import csw.params.events.{EventKey, EventName}
 
-import akka.util.Timeout
+import org.apache.pekko.util.Timeout
 import scala.concurrent.duration._
 import scala.concurrent.Await
 
@@ -84,21 +84,21 @@ class BgrxassemblyHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswC
       case LocationUpdated(location) => {
 
         location.connection match {
-          case AkkaConnection(ComponentId(Prefix(Subsystem.WFOS, "bgrxAssembly.rgriphcd"), _)) => {
+          case PekkoConnection(ComponentId(Prefix(Subsystem.WFOS, "bgrxAssembly.rgriphcd"), _)) => {
             log.info("Bgrx Assembly : Creating command service to RgripHcd")
             rgripHcdCS = Some(CommandServiceFactory.make(location))
           }
-          case AkkaConnection(ComponentId(Prefix(Subsystem.WFOS, "bgrxAssembly.lgriphcd"), _)) => {
+          case PekkoConnection(ComponentId(Prefix(Subsystem.WFOS, "bgrxAssembly.lgriphcd"), _)) => {
             log.info("Bgrx Assembly : Creating command service to LgripHcd")
             lgripHcdCS = Some(CommandServiceFactory.make(location))
           }
 
-          case AkkaConnection(ComponentId(Prefix(Subsystem.WFOS, "bgrxAssembly.lgmhcd"), _)) => {
+          case PekkoConnection(ComponentId(Prefix(Subsystem.WFOS, "bgrxAssembly.lgmhcd"), _)) => {
             log.info("Bgrx Assembly : Creating command service to Lgmhcd")
             lgmHcdCS = Some(CommandServiceFactory.make(location))
           }
 
-          case AkkaConnection(ComponentId(Prefix(Subsystem.WFOS, "bgrxAssembly.pacthcd"), _)) => {
+          case PekkoConnection(ComponentId(Prefix(Subsystem.WFOS, "bgrxAssembly.pacthcd"), _)) => {
             log.info("Bgrx Assembly : Creating command service to Pacthcd")
             pactHcdCS = Some(CommandServiceFactory.make(location))
           }
@@ -164,6 +164,8 @@ class BgrxassemblyHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswC
       case _: Observe =>
         log.error(s"Bgrx Assembly : Validation is Failure. $sourcePrefix only accepts Setup Commands")
         Invalid(runId, WrongCommandTypeIssue("Observe commands are not supported"))
+      case _ =>
+        Invalid(runId, UnsupportedCommandIssue("Invalid command type"))
     }
   }
 
@@ -230,10 +232,10 @@ class BgrxassemblyHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswC
   }
 
   private def moveRgripHcd(runId: Id, setup: Setup): Unit = {
-    val connection   = AkkaConnection(ComponentId(Prefix("wfos.bgrxAssembly.rgriphcd"), ComponentType.HCD))
-    val akkaLocation = Await.result(locationService.resolve(connection, 10.seconds), 10.seconds).get
+    val connection    = PekkoConnection(ComponentId(Prefix("wfos.bgrxAssembly.rgriphcd"), ComponentType.HCD))
+    val pekkoLocation = Await.result(locationService.resolve(connection, 10.seconds), 10.seconds).get
 
-    rgripHcdCS = Some(CommandServiceFactory.make(akkaLocation))
+    rgripHcdCS = Some(CommandServiceFactory.make(pekkoLocation))
 
     rgripHcdCS match {
       case Some(cs) => {
@@ -265,10 +267,10 @@ class BgrxassemblyHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswC
     val targetPosition = LgripInfo.targetPositionKey.set(100)
     val command: Setup = Setup(sourcePrefix, CommandName("move"), Some(obsId)).madd(targetPosition)
 
-    val connection   = AkkaConnection(ComponentId(Prefix("wfos.bgrxAssembly.lgriphcd"), ComponentType.HCD))
-    val akkaLocation = Await.result(locationService.resolve(connection, 10.seconds), 10.seconds).get
+    val connection    = PekkoConnection(ComponentId(Prefix("wfos.bgrxAssembly.lgriphcd"), ComponentType.HCD))
+    val pekkoLocation = Await.result(locationService.resolve(connection, 10.seconds), 10.seconds).get
 
-    lgripHcdCS = Some(CommandServiceFactory.make(akkaLocation))
+    lgripHcdCS = Some(CommandServiceFactory.make(pekkoLocation))
 
     lgripHcdCS match {
       case Some(cs) => {
@@ -302,10 +304,10 @@ class BgrxassemblyHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswC
 
     val command: Setup = Setup(sourcePrefix, CommandName("move"), Some(obsId)).madd(targetGratingPosition)
 
-    val connection   = AkkaConnection(ComponentId(Prefix("wfos.bgrxAssembly.lgmhcd"), ComponentType.HCD))
-    val akkaLocation = Await.result(locationService.resolve(connection, 10.seconds), 10.seconds).get
+    val connection    = PekkoConnection(ComponentId(Prefix("wfos.bgrxAssembly.lgmhcd"), ComponentType.HCD))
+    val pekkoLocation = Await.result(locationService.resolve(connection, 10.seconds), 10.seconds).get
 
-    lgmHcdCS = Some(CommandServiceFactory.make(akkaLocation))
+    lgmHcdCS = Some(CommandServiceFactory.make(pekkoLocation))
 
     lgmHcdCS match {
       case Some(cs) => {
@@ -339,10 +341,10 @@ class BgrxassemblyHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswC
 
     val command: Setup = Setup(sourcePrefix, CommandName("move"), Some(obsId)).madd(targetPosition)
 
-    val connection   = AkkaConnection(ComponentId(Prefix("wfos.bgrxAssembly.pacthcd"), ComponentType.HCD))
-    val akkaLocation = Await.result(locationService.resolve(connection, 10.seconds), 10.seconds).get
+    val connection    = PekkoConnection(ComponentId(Prefix("wfos.bgrxAssembly.pacthcd"), ComponentType.HCD))
+    val pekkoLocation = Await.result(locationService.resolve(connection, 10.seconds), 10.seconds).get
 
-    pactHcdCS = Some(CommandServiceFactory.make(akkaLocation))
+    pactHcdCS = Some(CommandServiceFactory.make(pekkoLocation))
 
     pactHcdCS match {
       case Some(cs) =>

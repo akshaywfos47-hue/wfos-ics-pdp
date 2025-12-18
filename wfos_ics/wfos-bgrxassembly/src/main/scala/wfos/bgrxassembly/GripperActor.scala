@@ -1,8 +1,8 @@
 package wfos.bgrxassembly
 
-import akka.Done
-import akka.actor.typed.scaladsl.{ActorContext, Behaviors}
-import akka.actor.typed.{ActorRef, Behavior}
+import org.apache.pekko.Done
+import org.apache.pekko.actor.typed.scaladsl.{ActorContext, Behaviors}
+import org.apache.pekko.actor.typed.{ActorRef, Behavior}
 import csw.framework.models.CswContext
 import csw.params.commands.CommandIssue.AssemblyBusyIssue
 import csw.params.commands.CommandResponse.{Accepted, Completed, Invalid}

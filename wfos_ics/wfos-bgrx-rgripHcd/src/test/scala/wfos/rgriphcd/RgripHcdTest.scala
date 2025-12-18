@@ -1,6 +1,9 @@
 package wfos.rgripHcd
 
-import csw.location.api.models.Connection.AkkaConnection
+import org.slf4j.LoggerFactory
+import csw.params.core.generics.{Key, KeyType}
+import csw.params.events.{EventKey, EventName, SystemEvent}
+import csw.location.api.models.Connection.PekkoConnection
 import csw.location.api.models.{ComponentId, ComponentType}
 import csw.prefix.models.Prefix
 import csw.testkit.scaladsl.CSWService.{LocationServer, EventServer}
@@ -34,17 +37,17 @@ class RgripHcdTest extends ScalaTestFrameworkTestKit(LocationServer, EventServer
   }
 
   test("HCD should be locatable using Location Service") {
-    val connection   = AkkaConnection(ComponentId(Prefix("wfos.bgrxAssembly.rgriphcd"), ComponentType.HCD))
-    val akkaLocation = Await.result(locationService.resolve(connection, 10.seconds), 10.seconds).get
+    val connection    = PekkoConnection(ComponentId(Prefix("wfos.rgriphcd"), ComponentType.HCD))
+    val pekkoLocation = Await.result(locationService.resolve(connection, 10.seconds), 10.seconds).get
 
-    akkaLocation.connection shouldBe connection
+    pekkoLocation.connection shouldBe connection
   }
 
   test("HCD should not accept Observe commands") {
-    val connection   = AkkaConnection(ComponentId(Prefix("wfos.bgrxAssembly.rgriphcd"), ComponentType.HCD))
-    val akkaLocation = Await.result(locationService.resolve(connection, 10.seconds), 10.seconds).get
+    val connection    = PekkoConnection(ComponentId(Prefix("wfos.rgriphcd"), ComponentType.HCD))
+    val pekkoLocation = Await.result(locationService.resolve(connection, 10.seconds), 10.seconds).get
 
-    val rgripHcdCS = CommandServiceFactory.make(akkaLocation)
+    val rgripHcdCS = CommandServiceFactory.make(pekkoLocation)
 
     val command: Observe = Observe(Prefix("wfos.bgrxAssembly.rgriphcd"), CommandName("move"), Some(RgripInfo.obsId))
     val response         = Await.result(rgripHcdCS.submit(command), 5000.millis)
@@ -53,10 +56,10 @@ class RgripHcdTest extends ScalaTestFrameworkTestKit(LocationServer, EventServer
   }
 
   test("HCD should be able to validate a command and return Completed type response") {
-    val connection   = AkkaConnection(ComponentId(Prefix("wfos.bgrxAssembly.rgriphcd"), ComponentType.HCD))
-    val akkaLocation = Await.result(locationService.resolve(connection, 10.seconds), 10.seconds).get
+    val connection    = PekkoConnection(ComponentId(Prefix("wfos.rgriphcd"), ComponentType.HCD))
+    val pekkoLocation = Await.result(locationService.resolve(connection, 10.seconds), 10.seconds).get
 
-    val rgripHcdCS = CommandServiceFactory.make(akkaLocation)
+    val rgripHcdCS = CommandServiceFactory.make(pekkoLocation)
     val log        = LoggerFactory.getLogger(getClass)
 
     val expectedStageKey: Key[String]    = KeyType.StringKey.make("expectedStage")
@@ -89,10 +92,10 @@ class RgripHcdTest extends ScalaTestFrameworkTestKit(LocationServer, EventServer
   }
 
   test("HCD should be able to execute a command and return Completed response") {
-    val connection   = AkkaConnection(ComponentId(Prefix("wfos.bgrxAssembly.rgriphcd"), ComponentType.HCD))
-    val akkaLocation = Await.result(locationService.resolve(connection, 10.seconds), 10.seconds).get
+    val connection    = PekkoConnection(ComponentId(Prefix("wfos.rgriphcd"), ComponentType.HCD))
+    val pekkoLocation = Await.result(locationService.resolve(connection, 10.seconds), 10.seconds).get
 
-    val rgripHcdCS = CommandServiceFactory.make(akkaLocation)
+    val rgripHcdCS = CommandServiceFactory.make(pekkoLocation)
 
     val expectedStageKey: Key[String]    = KeyType.StringKey.make("expectedStage")
     val expectedStage: Parameter[String] = expectedStageKey.set("Validation")

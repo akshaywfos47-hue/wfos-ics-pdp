@@ -31,9 +31,9 @@ lazy val `wfos-bgrxassembly` = project
 lazy val `wfos-bgrx-lgripHcd` = project
   .settings(
     libraryDependencies ++= Dependencies.lgripHcd ++ Seq(
-      "com.github.tmtsoftware.csw" %% "csw-config-client" % "5.0.1",
-      "com.github.tmtsoftware.csw" %% "csw-location-client" % "5.0.1",
-      "com.github.tmtsoftware.csw" %% "csw-config-api" % "5.0.1"
+      "com.github.tmtsoftware.csw" %% "csw-config-client" % CSW.Version,
+      "com.github.tmtsoftware.csw" %% "csw-location-client" % CSW.Version,
+      "com.github.tmtsoftware.csw" %% "csw-config-api" % CSW.Version
     )
   )
 
@@ -72,3 +72,5 @@ lazy val `wfos-wfos-icsdeploy` = project
 ThisBuild / libraryDependencies ++= Seq(
   "com.github.fge" % "uri-template" % "0.9"
 )
+ThisBuild / scalaVersion := Libs.ScalaVersion
+ThisBuild / scalafmtOnCompile := true

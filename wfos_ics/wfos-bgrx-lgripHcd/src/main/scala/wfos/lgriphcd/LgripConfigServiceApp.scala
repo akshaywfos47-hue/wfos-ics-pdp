@@ -1,6 +1,7 @@
 package wfos.lgriphcd
 
 import scala.util.{Failure, Success}
+import scala.concurrent.ExecutionContext.Implicits.global
 
 object LgripConfigServiceApp extends App {
   println("Starting LGRIP Configuration Service...")
