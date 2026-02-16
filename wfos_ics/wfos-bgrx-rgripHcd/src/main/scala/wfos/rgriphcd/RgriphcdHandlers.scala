@@ -86,6 +86,10 @@ class RgriphcdHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswConte
           log.info("RgripHcd : Validation Successful")
           Accepted(runId)
         }
+        else if (targetAngle.head == RgripInfo.currentAngle.head) {
+          log.info("RgripHcd : Validation Successful RgripHcd : gripper is already at target angle ")
+          Accepted(runId)
+        }
         else {
           log.error(s"RgripHcd: Gripper is already at target position")
           val stage  = RgripInfo.stageKey.set("Validation")

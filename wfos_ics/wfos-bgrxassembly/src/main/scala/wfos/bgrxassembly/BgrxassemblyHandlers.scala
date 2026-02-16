@@ -65,7 +65,7 @@ class BgrxassemblyHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswC
   implicit val timeout: Timeout = Timeout(5.seconds)
 
   // Prefix of assembly
-  private val sourcePrefix: Prefix = Prefix("wfos.bgrxassembly")
+  private val sourcePrefix: Prefix = Prefix("wfos.bgrxAssembly")
   private val obsId: ObsId         = ObsId("2023A-001-123")
 
   override def initialize(): Unit = {
