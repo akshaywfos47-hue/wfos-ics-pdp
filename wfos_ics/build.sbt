@@ -8,7 +8,7 @@ lazy val aggregatedProjects: Seq[ProjectReference] = Seq(
   `wfos-wfos-icsdeploy`
 )
 
-// Root project aggregating all subprojects
+// Root project
 lazy val `wfos-ics-root` = project
   .in(file("."))
   .aggregate(aggregatedProjects: _*)
@@ -49,14 +49,16 @@ lazy val `wfos-bgrx-lgmhcd` = project
     libraryDependencies ++= Dependencies.lgmhcd
   )
 
-  // / HCD module - LGM
+// HCD module - PACT
 lazy val `wfos-bgrx-pacthcd` = project
   .settings(
     libraryDependencies ++= Dependencies.pacthcd
   )
 
-// Deployment module
+// Deployment module - single merged definition
 lazy val `wfos-wfos-icsdeploy` = project
+  .in(file("wfos-wfos-icsdeploy"))
+  .enablePlugins(JavaAppPackaging, CswBuildInfo)
   .dependsOn(
     `wfos-bgrxassembly`,
     `wfos-bgrx-lgripHcd`,
@@ -68,9 +70,12 @@ lazy val `wfos-wfos-icsdeploy` = project
     libraryDependencies ++= Dependencies.WfosIcsDeploy
   )
 
-// Global dependencies (if required by all modules)
+// Global settings
 ThisBuild / libraryDependencies ++= Seq(
   "com.github.fge" % "uri-template" % "0.9"
 )
 ThisBuild / scalaVersion := Libs.ScalaVersion
 ThisBuild / scalafmtOnCompile := true
+
+// Run test suites sequentially to avoid port 7654 (CSW location service) conflicts
+Global / concurrentRestrictions += Tags.limit(Tags.Test, 1)

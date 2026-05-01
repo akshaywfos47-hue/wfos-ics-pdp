@@ -37,7 +37,7 @@ sealed abstract class BluegrxPosition(override val entryName: String) extends Gr
 object BluegrxPosition extends Enum[BluegrxPosition] {
   override def values: IndexedSeq[BluegrxPosition] = findValues
 
-  private lazy val choices: Choices              = Choices.from(values.map(_.entryName): _*)
+  private lazy val choices: Choices              = Choices.from(values.map(_.entryName)*)
   def makeChoiceKey(keyName: String): GChoiceKey = ChoiceKey.make(keyName, choices)
 
   case object left_edge  extends BluegrxPosition("0mm")

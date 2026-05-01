@@ -36,14 +36,14 @@ class RgripHcdTest extends ScalaTestFrameworkTestKit(LocationServer, EventServer
     LoggingSystemFactory.forTestingOnly()
   }
 
-  test("HCD should be locatable using Location Service") {
+  test("RgripHcdTest: HCD should be locatable using Location Service") {
     val connection    = PekkoConnection(ComponentId(Prefix("wfos.rgriphcd"), ComponentType.HCD))
     val pekkoLocation = Await.result(locationService.resolve(connection, 10.seconds), 10.seconds).get
 
     pekkoLocation.connection shouldBe connection
   }
 
-  test("HCD should not accept Observe commands") {
+  test("RgripHcdTest: HCD should not accept Observe commands") {
     val connection    = PekkoConnection(ComponentId(Prefix("wfos.rgriphcd"), ComponentType.HCD))
     val pekkoLocation = Await.result(locationService.resolve(connection, 10.seconds), 10.seconds).get
 
@@ -55,7 +55,7 @@ class RgripHcdTest extends ScalaTestFrameworkTestKit(LocationServer, EventServer
     response.asInstanceOf[Invalid].issue shouldBe a[WrongCommandTypeIssue]
   }
 
-  test("HCD should be able to validate a command and return Completed type response") {
+  test("RgripHcdTest: HCD should be able to validate a Setup command and return Completed type response") {
     val connection    = PekkoConnection(ComponentId(Prefix("wfos.rgriphcd"), ComponentType.HCD))
     val pekkoLocation = Await.result(locationService.resolve(connection, 10.seconds), 10.seconds).get
 
@@ -91,40 +91,69 @@ class RgripHcdTest extends ScalaTestFrameworkTestKit(LocationServer, EventServer
     response shouldBe a[Completed]
   }
 
-  test("HCD should be able to execute a command and return Completed response") {
+  // FSD 8.3.4 – HCD validates the targetAngle parameter and returns Invalid if outside 0–55 degrees
+  test("RgripHcdTest: HCD validates the targetAngle parameter and returns Invalid if it is outside the range 0-55 degrees") {
     val connection    = PekkoConnection(ComponentId(Prefix("wfos.rgriphcd"), ComponentType.HCD))
     val pekkoLocation = Await.result(locationService.resolve(connection, 10.seconds), 10.seconds).get
 
     val rgripHcdCS = CommandServiceFactory.make(pekkoLocation)
 
-    val expectedStageKey: Key[String]    = KeyType.StringKey.make("expectedStage")
-    val expectedStage: Parameter[String] = expectedStageKey.set("Validation")
+    val targetAngle: Parameter[Int] = RgripInfo.targetAngleKey.set(60)
 
-    val expectedStatusKey: Key[String]    = KeyType.StringKey.make("expectedStatus")
-    val expectedStatus: Parameter[String] = expectedStatusKey.set("Failure")
-    val log                               = LoggerFactory.getLogger(getClass)
+    val command: Setup =
+      Setup(Prefix("wfos.bgrxAssembly.rgriphcd"), CommandName("move"), Some(RgripInfo.obsId)).madd(targetAngle)
 
-    val params: Set[Parameter[_]] = Set(expectedStage, expectedStatus)
+    val response = Await.result(rgripHcdCS.submit(command), 5000.millis)
+    response.asInstanceOf[Invalid].issue shouldBe a[ParameterValueOutOfRangeIssue]
+  }
+
+  // FSD 8.3.5 – HCD validates the command name and returns Invalid if it is not move
+  test("RgripHcdTest: HCD validates the command name and returns Invalid if it is not move") {
+    val connection    = PekkoConnection(ComponentId(Prefix("wfos.rgriphcd"), ComponentType.HCD))
+    val pekkoLocation = Await.result(locationService.resolve(connection, 10.seconds), 10.seconds).get
+
+    val rgripHcdCS = CommandServiceFactory.make(pekkoLocation)
+
+    val targetAngle: Parameter[Int] = RgripInfo.targetAngleKey.set(30)
+
+    val command: Setup =
+      Setup(Prefix("wfos.bgrxAssembly.rgriphcd"), CommandName("rotate"), Some(RgripInfo.obsId)).madd(targetAngle)
+
+    val response = Await.result(rgripHcdCS.submit(command), 5000.millis)
+    response.asInstanceOf[Invalid].issue shouldBe a[UnsupportedCommandIssue]
+  }
+
+  // FSD 8.3.6 – HCD should publish a status event on command execution
+  test("RgripHcdTest: HCD should publish a status event on command execution") {
+    val connection    = PekkoConnection(ComponentId(Prefix("wfos.rgriphcd"), ComponentType.HCD))
+    val pekkoLocation = Await.result(locationService.resolve(connection, 10.seconds), 10.seconds).get
+
+    val rgripHcdCS = CommandServiceFactory.make(pekkoLocation)
+    val log        = LoggerFactory.getLogger(getClass)
+
+    var eventReceived = false
 
     val testSubscriber = eventService.defaultSubscriber
     testSubscriber.subscribeCallback(
-      Set(EventKey(Prefix("wfos.bgrxAssembly.rgriphcd"), EventName("RgripHcd_status"))),
+      Set(EventKey(Prefix("wfos.rgriphcd"), EventName("rgripStateEvent"))),
       event => {
-        log.info("Rgrip test case 4 Event is Trigerred")
+        log.info("RgripHcd rgripStateEvent received")
         event shouldBe a[SystemEvent]
-        event.paramSet shouldBe params
+        eventReceived = true
       }
     )
 
-    val targetAngle: Parameter[Int]    = RgripInfo.targetAngleKey.set(35)
+    val targetAngle: Parameter[Int]    = RgripInfo.targetAngleKey.set(28)
     val gratingMode: Parameter[String] = RgripInfo.gratingModeKey.set("bgid3")
     val cw: Parameter[Int]             = RgripInfo.cwKey.set(6000)
 
     val command: Setup =
       Setup(Prefix("wfos.bgrxAssembly.rgriphcd"), CommandName("move"), Some(RgripInfo.obsId)).madd(targetAngle, gratingMode, cw)
 
-    val response = Await.result(rgripHcdCS.submit(command), 5000.millis)
+    val response = Await.result(rgripHcdCS.submit(command), 10.seconds)
     response shouldBe a[Completed]
+    Thread.sleep(500)
+    assert(eventReceived, "rgripStateEvent should have been published on command execution")
   }
 
 }

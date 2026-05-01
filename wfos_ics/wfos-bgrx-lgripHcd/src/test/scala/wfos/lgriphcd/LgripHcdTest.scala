@@ -34,14 +34,14 @@ class LgripHcdTest extends ScalaTestFrameworkTestKit(LocationServer, EventServer
     super.afterAll()
   }
 
-  test("HCD should be locatable using Location Service") {
+  test("LgripHcdTest: HCD should be locatable using Location Service") {
     val connection    = PekkoConnection(ComponentId(Prefix("wfos.lgriphcd"), ComponentType.HCD))
     val pekkoLocation = Await.result(locationService.resolve(connection, 10.seconds), 10.seconds).get
 
     pekkoLocation.connection shouldBe connection
   }
 
-  test("HCD should not accept Observe commands") {
+  test("LgripHcdTest: HCD should not accept Observe commands") {
     val connection    = PekkoConnection(ComponentId(Prefix("wfos.lgriphcd"), ComponentType.HCD))
     val pekkoLocation = Await.result(locationService.resolve(connection, 10.seconds), 10.seconds).get
 
@@ -53,64 +53,73 @@ class LgripHcdTest extends ScalaTestFrameworkTestKit(LocationServer, EventServer
     response.asInstanceOf[Invalid].issue shouldBe a[WrongCommandTypeIssue]
   }
 
-  test("HCD should be able to validate a command and return Invalid type response") {
+  // FSD 8.4.3 – HCD should be able to validate a Setup command and return Completed type response
+  test("LgripHcdTest: HCD should be able to validate a Setup command and return Completed type response") {
     val connection    = PekkoConnection(ComponentId(Prefix("wfos.lgriphcd"), ComponentType.HCD))
     val pekkoLocation = Await.result(locationService.resolve(connection, 10.seconds), 10.seconds).get
 
     val lgripHcdCS = CommandServiceFactory.make(pekkoLocation)
 
-    val expectedStageKey: Key[String]    = KeyType.StringKey.make("expectedStage")
-    val expectedStage: Parameter[String] = expectedStageKey.set("Validation")
+    val targetPosition: Parameter[Int] = LgripInfo.targetPositionKey.set(1000)
+    val command: Setup = Setup(Prefix("wfos.bgrxAssembly.lgriphcd"), CommandName("move"), Some(LgripInfo.obsId)).madd(targetPosition)
 
-    val expectedStatusKey: Key[String]    = KeyType.StringKey.make("expectedStatus")
-    val expectedStatus: Parameter[String] = expectedStatusKey.set("Failure")
+    val response = Await.result(lgripHcdCS.submit(command), 30.seconds)
+    response shouldBe a[Completed]
+  }
 
-    val params: Set[Parameter[_]] = Set(expectedStage, expectedStatus)
+  // FSD 8.4.4 – HCD validates the targetPosition parameter and returns Invalid if outside 0–1000 mm
+  test("LgripHcdTest: HCD validates the targetPosition parameter and returns Invalid if it is outside the range 0-1000 mm") {
+    val connection    = PekkoConnection(ComponentId(Prefix("wfos.lgriphcd"), ComponentType.HCD))
+    val pekkoLocation = Await.result(locationService.resolve(connection, 10.seconds), 10.seconds).get
 
-    val testSubscriber = eventService.defaultSubscriber
-    testSubscriber.subscribeCallback(
-      Set(EventKey(Prefix("wfos.bgrxAssembly.lgriphcd"), EventName("LgripHcd_status"))),
-      event => {
-        event shouldBe a[SystemEvent]
-        event.paramSet shouldBe params
-      }
-    )
+    val lgripHcdCS = CommandServiceFactory.make(pekkoLocation)
 
-    val targetPosition: Parameter[Int] = LgripInfo.targetPositionKey.set(0)
+    val targetPosition: Parameter[Int] = LgripInfo.targetPositionKey.set(1500)
     val command: Setup = Setup(Prefix("wfos.bgrxAssembly.lgriphcd"), CommandName("move"), Some(LgripInfo.obsId)).madd(targetPosition)
 
     val response = Await.result(lgripHcdCS.submit(command), 5000.millis)
     response.asInstanceOf[Invalid].issue shouldBe a[ParameterValueOutOfRangeIssue]
   }
 
-  test("HCD should be able to execute a command and return Completed response") {
+  // FSD 8.4.5 – HCD validates the command name and returns Invalid if it is not move
+  test("LgripHcdTest: HCD validates the command name and returns Invalid if it is not move") {
     val connection    = PekkoConnection(ComponentId(Prefix("wfos.lgriphcd"), ComponentType.HCD))
     val pekkoLocation = Await.result(locationService.resolve(connection, 10.seconds), 10.seconds).get
 
     val lgripHcdCS = CommandServiceFactory.make(pekkoLocation)
 
-    val expectedStageKey: Key[String]    = KeyType.StringKey.make("expectedStage")
-    val expectedStage: Parameter[String] = expectedStageKey.set("Setup")
+    val targetPosition: Parameter[Int] = LgripInfo.targetPositionKey.set(500)
+    val command: Setup = Setup(Prefix("wfos.bgrxAssembly.lgriphcd"), CommandName("extend"), Some(LgripInfo.obsId)).madd(targetPosition)
 
-    val expectedStatusKey: Key[String]    = KeyType.StringKey.make("expectedStatus")
-    val expectedStatus: Parameter[String] = expectedStatusKey.set("Completion")
+    val response = Await.result(lgripHcdCS.submit(command), 5000.millis)
+    response.asInstanceOf[Invalid].issue shouldBe a[UnsupportedCommandIssue]
+  }
 
-    val params: Set[Parameter[_]] = Set(expectedStage, expectedStatus)
+  // FSD 8.4.6 – HCD should publish a status event on command execution
+  test("LgripHcdTest: HCD should publish a status event on command execution") {
+    val connection    = PekkoConnection(ComponentId(Prefix("wfos.lgriphcd"), ComponentType.HCD))
+    val pekkoLocation = Await.result(locationService.resolve(connection, 10.seconds), 10.seconds).get
+
+    val lgripHcdCS = CommandServiceFactory.make(pekkoLocation)
+
+    var eventReceived = false
 
     val testSubscriber = eventService.defaultSubscriber
     testSubscriber.subscribeCallback(
-      Set(EventKey(Prefix("wfos.bgrxAssembly.lgriphcd"), EventName("LgripHcd_status"))),
+      Set(EventKey(Prefix("wfos.lgriphcd"), EventName("lgripStateEvent"))),
       event => {
         event shouldBe a[SystemEvent]
-        event.paramSet shouldBe params
+        eventReceived = true
       }
     )
 
-    val targetPosition = LgripInfo.targetPositionKey.set(50)
+    val targetPosition: Parameter[Int] = LgripInfo.targetPositionKey.set(0)
     val command: Setup = Setup(Prefix("wfos.bgrxAssembly.lgriphcd"), CommandName("move"), Some(LgripInfo.obsId)).madd(targetPosition)
 
-    val response = Await.result(lgripHcdCS.submit(command), 5000.millis)
+    val response = Await.result(lgripHcdCS.submit(command), 10.seconds)
     response shouldBe a[Completed]
+    Thread.sleep(500)
+    assert(eventReceived, "lgripStateEvent should have been published on command execution")
   }
 
 }

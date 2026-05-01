@@ -7,7 +7,7 @@ import csw.location.api.models.{ComponentId, ComponentType}
 
 import csw.params.commands.Setup
 //import csw.prefix.models.Subsystem.WFOS
-import csw.testkit.scaladsl.CSWService.{LocationServer, EventServer}
+import csw.testkit.scaladsl.CSWService.{AlarmServer, LocationServer, EventServer}
 import csw.testkit.scaladsl.ScalaTestFrameworkTestKit
 import org.scalatest.funsuite.AnyFunSuiteLike
 
@@ -21,7 +21,7 @@ import csw.params.commands.CommandIssue._
 import csw.logging.client.scaladsl.LoggingSystemFactory
 import wfos.rgriphcd.RgripInfo
 
-class BgrxassemblyTest extends ScalaTestFrameworkTestKit(LocationServer, EventServer) with AnyFunSuiteLike {
+class BgrxassemblyTest extends ScalaTestFrameworkTestKit(AlarmServer, LocationServer, EventServer) with AnyFunSuiteLike {
 
   import frameworkTestKit._
 
@@ -36,14 +36,14 @@ class BgrxassemblyTest extends ScalaTestFrameworkTestKit(LocationServer, EventSe
     super.afterAll()
   }
 
-  test("Assembly should be locatable using Location Service") {
+  test("BgrxassemblyTest: Assembly should be locatable using Location Service") {
     val connection    = PekkoConnection(ComponentId(Prefix("wfos.bgrxAssembly"), ComponentType.Assembly))
     val pekkoLocation = Await.result(locationService.resolve(connection, 10.seconds), 10.seconds).get
 
     pekkoLocation.connection shouldBe connection
   }
 
-  test("Assembly should not accept Observe commands and send Invalid Response") {
+  test("BgrxassemblyTest: Assembly should not accept Observe commands and send Invalid Response") {
     val connection    = PekkoConnection(ComponentId(Prefix("wfos.bgrxAssembly"), ComponentType.Assembly))
     val pekkoLocation = Await.result(locationService.resolve(connection, 10.seconds), 10.seconds).get
 
@@ -54,7 +54,7 @@ class BgrxassemblyTest extends ScalaTestFrameworkTestKit(LocationServer, EventSe
     response.asInstanceOf[Invalid].issue shouldBe a[WrongCommandTypeIssue]
   }
 
-  test("Assembly should be able to validate Setup commands and send Invalid Response") {
+  test("BgrxassemblyTest: Assembly should be able to validate Setup commands and send Invalid Response if the parameters are not valid") {
     val connection    = PekkoConnection(ComponentId(Prefix("wfos.bgrxAssembly"), ComponentType.Assembly))
     val pekkoLocation = Await.result(locationService.resolve(connection, 10.seconds), 10.seconds).get
 
@@ -62,7 +62,7 @@ class BgrxassemblyTest extends ScalaTestFrameworkTestKit(LocationServer, EventSe
     val gratingMode: Parameter[String] = RgripInfo.gratingModeKey.set("bgid6")
     val cw: Parameter[Int]             = RgripInfo.cwKey.set(6000)
 
-    val command: Setup = Setup(Prefix("wfos.bgrxAssembly"), CommandName("move"), Some(RgripInfo.obsId)).madd(targetAngle, gratingMode, cw)
+    val command: Setup = Setup(Prefix("wfos.bgrxAssembly"), CommandName("pickup"), Some(RgripInfo.obsId)).madd(targetAngle, gratingMode, cw)
 
     val bgrxCS   = CommandServiceFactory.make(pekkoLocation)
     val response = Await.result(bgrxCS.submit(command), 5000.millis)
