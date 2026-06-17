@@ -12,8 +12,8 @@ object RgripInfo {
   // val homeAngleKey: Key[Int]    = KeyType.IntKey.make("homeAngle")
   // val homeAngle: Parameter[Int] = homeAngleKey.set(28)
 
-  val currentAngleKey: Key[Int]    = KeyType.IntKey.make("currentAngle")
-  var currentAngle: Parameter[Int] = currentAngleKey.set(28)
+  val currentAngleKey: Key[Int] = KeyType.IntKey.make("currentAngle")
+  // var currentAngle: Parameter[Int] = currentAngleKey.set(28)
 
   val targetAngleKey: Key[Int]    = KeyType.IntKey.make("targetAngle")
   val gratingModeKey: Key[String] = KeyType.StringKey.make("gratingMode")
@@ -39,4 +39,14 @@ object RgripInfo {
   val maxCW: Parameter[Int] = maxCWKey.set(9000)
 
   val obsId: ObsId = ObsId("2023A-001-123")
+
+  // grating presence key
+  val rgripHasGratingKey: Key[Boolean] = KeyType.BooleanKey.make("gratingPresence")
+  // val rgripHasGrating: Parameter[Boolean] = gratingPresenceKey.set(true)
+
+  val rgripGratingIdKey: Key[String] = KeyType.StringKey.make("gratingId")
+  // val rgripGratingId: Parameter[String] = rgripGratingIdKey.set("bgid2")
+
+  val operationKey: Key[String] = KeyType.StringKey.make("operation")
+
 }

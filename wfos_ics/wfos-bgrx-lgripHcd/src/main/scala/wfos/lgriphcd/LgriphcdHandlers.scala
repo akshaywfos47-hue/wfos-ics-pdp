@@ -41,32 +41,37 @@ class LgriphcdHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswConte
 
   // val rgripHcd = new RgripHcd()
 
+// creating object of case class state variable value
+  private var lstate = LgripState(
+    currentPosition = 0,
+    targetPosition = 0
+  )
   // Called when the component is created
   override def initialize(): Unit = {
     log.info(s"Initializing $prefix")
-    log.info(s"LgripHcd : Checking if $prefix is at home position")
+//    log.info(s"LgripHcd : Checking if $prefix is at home position")
 
-    log.info(s"Home Position - ${LgripInfo.homePosition.head}, Current Position - ${LgripInfo.currentPosition.head}")
-    if (LgripInfo.currentPosition.head != LgripInfo.homePosition.head) {
-      log.error("LgripHcd : gripper is not at the home position")
+//    log.info(s"Home Position - ${LgripInfo.homePosition.head}, Current Position - ${lstate.currentPosition}")
+//    if (lstate.currentPosition != LgripInfo.homePosition.head) {
+//      log.error("LgripHcd : gripper is not at the home position")
 
-      // val targetPosition: Parameter[Int] = LgripInfo.targetPositionKey.set(LgripInfo.homePosition.head)
-      // val sc1: Setup                     = Setup(prefix, CommandName("move"), Some(LgripInfo.obsId)).madd(targetPosition)
+    // val targetPosition: Parameter[Int] = LgripInfo.targetPositionKey.set(LgripInfo.homePosition.head)
+    // val sc1: Setup                     = Setup(prefix, CommandName("move"), Some(LgripInfo.obsId)).madd(targetPosition)
 
-      // val validateResponse = validateCommand(Id(), sc1)
-      // validateResponse match {
-      //   case Accepted(runId) => onSubmit(runId, sc1)
-      //   case Invalid(runId, commandissue) => {
-      //     log.error("LgripHcd : Validation Failure")
-      //     // log.info(s"${validateResponse.commandissue}")
-      //     log.error(s"$commandissue")
-      //     Invalid(runId, commandissue)
-      //   }
-      // }
-    }
-    else {
-      log.info("LgripHcd : Gripper is at home position")
-    }
+    // val validateResponse = validateCommand(Id(), sc1)
+    // validateResponse match {
+    //   case Accepted(runId) => onSubmit(runId, sc1)
+    //   case Invalid(runId, commandissue) => {
+    //     log.error("LgripHcd : Validation Failure")
+    //     // log.info(s"${validateResponse.commandissue}")
+    //     log.error(s"$commandissue")
+    //     Invalid(runId, commandissue)
+    //   }
+    // }
+//    }
+//    else {
+//      log.info("LgripHcd : Gripper is at home position")
+//    }
   }
 
   override def onLocationTrackingEvent(trackingEvent: TrackingEvent): Unit = {}
@@ -75,20 +80,21 @@ class LgriphcdHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswConte
     log.info(s"LgripHcd : Command - $runId is being validated")
     controlCommand match {
       case setup: Setup => {
-        val targetPosition = setup(LgripInfo.targetPositionKey)
-        if (targetPosition.head != LgripInfo.currentPosition.head) {
-          log.info("LgripHcd : Validation Successful")
+
+        val targetPosition = setup(LgripInfo.targetPositionKey).head
+
+        if (
+          targetPosition >= LgripInfo.minTargetPosition.head &&
+          targetPosition <= LgripInfo.maxTargetPosition.head
+        )
           Accepted(runId)
-        }
         else {
-          log.error("LgripHcd : Gripper is already at target angle")
+          val stage                = LgripInfo.stageKey.set("Validation")
+          val status               = LgripInfo.statusKey.set("Failure")
+          val lgripcurrentPosition = LgripInfo.currentPositionKey.set(lstate.currentPosition)
+          publishLgripStatus(stage, status, lgripcurrentPosition)
 
-          val stage  = LgripInfo.stageKey.set("Validation")
-          val status = LgripInfo.statusKey.set("Failure")
-          val event  = SystemEvent(componentInfo.prefix, EventName("LgripHcd_status")).madd(stage, status)
-          publisher.publish(event)
-
-          Invalid(runId, ParameterValueOutOfRangeIssue("LgripHcd : Gripper is already at target angle"))
+          Invalid(runId, ParameterValueOutOfRangeIssue("LgripHcd : taget position is out of range  "))
         }
       }
       case _: Observe => Invalid(runId, WrongCommandTypeIssue("LgripHcd accepts only setup commands"))
@@ -106,47 +112,86 @@ class LgriphcdHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswConte
   }
 
   private def onSetup(runId: Id, setup: Setup): SubmitResponse = {
+    // updating state variable
+    val targetPosition = setup(LgripInfo.targetPositionKey).head
+    lstate = lstate.copy(targetPosition = targetPosition)
+
     val alarmKey              = AlarmKey(Prefix("wfos.bgrxAssembly.lgriphcd"), "alarmTriggeredOnLgrip")
     val resultF: Future[Done] = clientAPI.setSeverity(alarmKey, Okay)
     log.info(s"LgripHcd : Executing the received command with runId - $runId")
-    val targetPosition: Parameter[Int] = setup(LgripInfo.targetPositionKey)
-    val delay: Int                     = 10
-    log.info(s"LgripHcd : Gripper is at ${LgripInfo.currentPosition.head}cm")
+    // val targetPosition: Parameter[Int] = setup(LgripInfo.targetPositionKey)
+    val delay: Int = 10
+    log.info(s"LgripHcd : Gripper is at ${lstate.currentPosition}cm")
     var timeElapsed = 0L // Variable to track elapsed time
-    while (LgripInfo.currentPosition.head != targetPosition.head) {
-      LgripInfo.currentPosition = LgripInfo.currentPositionKey.set(
-        if (LgripInfo.currentPosition.head < targetPosition.head) LgripInfo.currentPosition.head + 1
-        else LgripInfo.currentPosition.head - 1
-      )
 
-      if (LgripInfo.currentPosition.head % 10 == 0) {
-        val message = s"LgripHcd : Moving gripper to ${LgripInfo.currentPosition.head}"
-        // log.info(message)
-        // Create and publish the event
-        val event = createMovementEvent(message)
-        publisher.publish(event)
-      }
-
-      // Check if 9 seconds have elapsed since loop start
-      val currentTime = System.currentTimeMillis()
-      if (currentTime - timeElapsed >= 9000) {
-        clientAPI.setSeverity(alarmKey, Okay)
-        timeElapsed = currentTime // Reset timer for next interval
-      }
-      Thread.sleep(delay)
+    if (lstate.currentPosition == targetPosition) {
+      log.info("LgripHcd : Lgrip is already at target position")
+      val stage  = LgripInfo.stageKey.set("Setup")
+      val status = LgripInfo.statusKey.set("Completed")
+      // val message = LgripInfo.messageKey.set("Lgrip already at target position")
+      val lgripcurrentPosition = LgripInfo.currentPositionKey.set(lstate.currentPosition)
+      publishLgripStatus(stage, status, lgripcurrentPosition)
+      Completed(runId)
     }
+    else {
+      while (lstate.currentPosition != targetPosition) {
+        val nextPosition =
+          if (lstate.currentPosition < targetPosition)
+            lstate.currentPosition + 1
+          else
+            lstate.currentPosition - 1
 
-    val stage  = LgripInfo.stageKey.set("Setup")
-    val status = LgripInfo.statusKey.set("Completed")
-    val event  = SystemEvent(componentInfo.prefix, EventName("LgripHcd_status")).madd(stage, status)
-    publisher.publish(event)
-    Completed(runId)
+        lstate = lstate.copy(currentPosition = nextPosition)
+
+        if (lstate.currentPosition % 10 == 0) {
+          val message = s"LgripHcd : Moving gripper to ${lstate.currentPosition}"
+          // log.info(message)
+          // Create and publish the event
+          val lPosition = LgripInfo.currentPositionKey.set(lstate.currentPosition)
+          val event     = createMovementEvent(lPosition)
+          publisher.publish(event)
+        }
+
+        // Check if 9 seconds have elapsed since loop start
+        val currentTime = System.currentTimeMillis()
+        if (currentTime - timeElapsed >= 9000) {
+          clientAPI.setSeverity(alarmKey, Okay)
+          timeElapsed = currentTime // Reset timer for next interval
+        }
+        Thread.sleep(delay)
+      }
+
+      val stage                = LgripInfo.stageKey.set("Setup")
+      val status               = LgripInfo.statusKey.set("Completed")
+      val lgripcurrentPosition = LgripInfo.currentPositionKey.set(lstate.currentPosition)
+      publishLgripStatus(stage, status, lgripcurrentPosition)
+      Completed(runId)
+    }
   }
 
-  private def createMovementEvent(message: String): SystemEvent = {
+  private def createMovementEvent(position: Parameter[Int]): SystemEvent = {
+
+    val eventName =
+      (
+        if (lstate.targetPosition == LgripInfo.exchangePosition.head)
+          "lgripMoveToExchangePositionEvent"
+        else
+          "lgripMoveToHomePositionEvent"
+      )
     // Create a SystemEvent representing the movement of the gripper
-    SystemEvent(componentInfo.prefix, EventName("LgripMovementEvent"))
-      .madd(LgripInfo.messageKey.set(message))
+    SystemEvent(componentInfo.prefix, EventName(eventName))
+      .madd(position)
+  }
+  // lgrip status event
+  private def publishLgripStatus(stage: Parameter[String], status: Parameter[String], position: Parameter[Int]): Unit = {
+    val event =
+      SystemEvent(prefix, EventName("LgripStatusEvent"))
+        .madd(
+          stage,
+          status,
+          position
+        )
+    publisher.publish(event)
   }
 
   override def onOneway(runId: Id, controlCommand: ControlCommand): Unit = {}

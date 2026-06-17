@@ -11,8 +11,8 @@ object LgripInfo {
   val homePositionKey: Key[Int]    = KeyType.IntKey.make("homePosition")
   val homePosition: Parameter[Int] = homePositionKey.set(0)
 
-  val currentPositionKey: Key[Int]    = KeyType.IntKey.make("currentPosition")
-  var currentPosition: Parameter[Int] = currentPositionKey.set(0)
+  val currentPositionKey: Key[Int] = KeyType.IntKey.make("currentPosition")
+  // var currentPosition: Parameter[Int] = currentPositionKey.set(0)
 
   val targetPositionKey: Key[Int] = KeyType.IntKey.make("targetPosition")
   // val gratingModeKey: Key[String] = KeyType.StringKey.make("gratingMode")

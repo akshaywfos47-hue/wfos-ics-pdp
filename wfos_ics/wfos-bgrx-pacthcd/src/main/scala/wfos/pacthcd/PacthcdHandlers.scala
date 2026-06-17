@@ -25,11 +25,15 @@ class PacthcdHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswContex
   private val prefix                        = cswCtx.componentInfo.prefix
   private val publisher                     = eventService.defaultPublisher
 
+  private var pactState = PactState(
+    currentPosition = 500.0
+  )
+
   override def initialize(): Unit = {
     log.info(s"Initializing $prefix")
     log.info(s"PactHcd : Checking if $prefix is at its current position")
 
-    log.info(s"Current Position - ${PactInfo.currentPosition.head}")
+    log.info(s"Current Position - ${pactState.currentPosition}")
   }
 
   override def onLocationTrackingEvent(trackingEvent: TrackingEvent): Unit = {}
@@ -50,39 +54,90 @@ class PacthcdHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswContex
     println(s"PactHcd : Received command - OnSubmit123")
     log.info(s"PactHcd : Executing the received command with runId - $runId")
 
-    val delay: Int                        = 1000
-    val targetPosition: Parameter[Double] = setup(PactInfo.targetPositionKey)
+    val operation = setup(PactInfo.operationKey).head // PUSH / PULL
 
-    log.info(s"PactHcd : Rod is currently at ${PactInfo.currentPosition.head}mm")
-
-    while (PactInfo.currentPosition.head != targetPosition.head) {
-      PactInfo.currentPosition = PactInfo.currentPositionKey.set(
-        if (PactInfo.currentPosition.head < targetPosition.head)
-          PactInfo.currentPosition.head + 50 // Move forward by 50 units
-        else
-          PactInfo.currentPosition.head - 50 // Move backward by 50 units
-      )
-
-      if (PactInfo.currentPosition.head % 10 == 0) {
-        val message = s"PactHcd : Moving rod to ${PactInfo.currentPosition.head}mm"
-        // Create and publish the event
-        val event = createMovementEvent(message)
-        publisher.publish(event)
-      }
-      Thread.sleep(delay)
-    }
-
-    val stage  = PactInfo.stageKey.set("Setup")
-    val status = PactInfo.statusKey.set("Completed")
-    val event  = SystemEvent(componentInfo.prefix, EventName("PactHcd_status")).madd(stage, status)
-    publisher.publish(event)
+    executeOperation(operation, runId)
     Completed(runId)
+  }
+
+  private def executeOperation(operation: String, runId: Id): Unit = {
+    //  decision point
+    operation match {
+      case "PUSH" =>
+        // Step 1 → move OUT → IN (500 → 0)
+        moveToPosition(0.0, "IN")
+        // call assembly event
+        publishPactPushPullEvent("PUSH")
+        publishPactStatus("PUSH", "At-IN")
+        moveToPosition(500.0, "OUT")
+        publishPactStatus("PUSH", "At-OUT")
+
+      case "PULL" =>
+        moveToPosition(0.0, "IN")
+        publishPactStatus("PULL", "At-IN")
+        moveToPosition(500.0, "OUT")
+        // call assembly event
+        publishPactPushPullEvent("PULL")
+        publishPactStatus("Pull", "At-OUT")
+      case _ =>
+        log.error(" operation is not supported ,operation should be PUSH or PULL only  ")
+        Invalid(runId, ParameterValueOutOfRangeIssue("Target out of range"))
+    }
+    // final completion
+    publishPactStatus(operation, "Completed")
+  }
+
+  private def moveToPosition(target: Double, stage: String): Unit = {
+
+    while (pactState.currentPosition != target) {
+
+      val next =
+        if (pactState.currentPosition < target) {
+          val temp = pactState.currentPosition + 50
+          if (temp > target) target else temp
+        }
+        else {
+          val temp = pactState.currentPosition - 50
+          if (temp < target) target else temp
+        }
+
+      pactState = pactState.copy(currentPosition = next)
+
+      if (pactState.currentPosition % 10 == 0) {
+        publisher.publish(createMovementEvent(s"$stage → ${pactState.currentPosition}"))
+      }
+
+      Thread.sleep(50)
+    }
   }
 
   private def createMovementEvent(message: String): SystemEvent = {
     // Create a SystemEvent representing the movement of the gripper
     SystemEvent(componentInfo.prefix, EventName("PactMovementEvent"))
       .madd(PactInfo.messageKey.set(message))
+  }
+
+  private def publishPactStatus(stage: String, status: String): Unit = {
+
+    val event =
+      SystemEvent(prefix, EventName("PactStatusEventone"))
+        .madd(
+          PactInfo.stageKey.set(stage),   // PUSH / PULL
+          PactInfo.statusKey.set(status), // At-IN / Completed
+          PactInfo.currentPositionKey.set(pactState.currentPosition)
+        )
+
+    publisher.publish(event)
+  }
+  private def publishPactPushPullEvent(operation: String): Unit = {
+    log.info(" publishPactPushPullEvent CALLED")
+    val event = SystemEvent(prefix, EventName("pactPushPullEventone")).madd(
+      PactInfo.currentPositionKey.set(pactState.currentPosition),
+      PactInfo.operationKey.set(operation)
+    )
+
+    publisher.publish(event)
+
   }
 
   override def onOneway(runId: Id, controlCommand: ControlCommand): Unit = {}

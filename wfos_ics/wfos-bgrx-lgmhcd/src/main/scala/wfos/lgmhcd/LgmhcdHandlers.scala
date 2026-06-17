@@ -33,13 +33,22 @@ class LgmhcdHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswContext
   private val prefix                        = cswCtx.componentInfo.prefix
   private val publisher                     = eventService.defaultPublisher
 
+  // state variables
+
+  private var lgmState = LgmState(
+    currentPosition = 112.5,
+    emptySlot = true,
+    emptySlotBgid = Some("bgid2"),
+    emptySlotLinearDistance = Some(112.5),
+    emptySlotIndex = Some(1)
+  )
   override def initialize(): Unit = {
     log.info(s"Initializing $prefix")
     log.info(s"LgmHcd : Checking if $prefix is at home position")
 
-    log.info(s"Home Position - ${LgmInfo.homePosition.head}, Current Position - ${LgmInfo.currentPosition.head}")
-    if (LgmInfo.currentPosition.head != LgmInfo.homePosition.head) {
-      log.error("LgmHcd : Grating magazine is not at the home position")
+    log.info(s"Home Position - ${LgmInfo.homePosition.head}, Current Position - ${lgmState.currentPosition}")
+    if (lgmState.currentPosition != LgmInfo.homePosition.head) {
+      log.info("LgminfoHcd : Grating magazine is not at the home position")
     }
     else {
       log.info("LgmHcd : Grating Magazine is at home position")
@@ -49,37 +58,60 @@ class LgmhcdHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswContext
   override def onLocationTrackingEvent(trackingEvent: TrackingEvent): Unit = {}
 
   override def validateCommand(runId: Id, controlCommand: ControlCommand): ValidateCommandResponse = {
-    log.info(s"LgmHcd : Command - $runId is being validated")
+
     controlCommand match {
-      case setup: Setup => {
-        val targetGratingPosition = setup(LgmInfo.targetGratingPositionKey)
-        if (targetGratingPosition.head != LgmInfo.currentPosition.head) {
-          log.info("LgmHcd : Validation Successful")
-          Accepted(runId)
+      case setup: Setup =>
+        setup.commandName match {
+          // 🔹 MOVE command
+          case CommandName("move") =>
+            val target = setup(LgmInfo.targetGratingPositionKey)
+            if (
+              target.head >= LgmInfo.minTargetGrating.head &&
+              target.head <= LgmInfo.maxTargetGrating.head
+            ) Accepted(runId)
+            else
+              val stage  = LgmInfo.stageKey.set("Validation")
+              val status = LgmInfo.statusKey.set("Failure")
+              val event  = SystemEvent(componentInfo.prefix, EventName("LgmHcd_status")).madd(stage, status)
+              publisher.publish(event)
+              Invalid(runId, ParameterValueOutOfRangeIssue("Target out of range"))
+
+          //  UPDATE command (PUSH / PULL)
+          case CommandName("update") =>
+            val op =
+              if (setup.exists(LgmInfo.operationKey))
+                Some(setup(LgmInfo.operationKey).head)
+              else None
+            if (op.contains("PUSH") || op.contains("PULL"))
+              Accepted(runId)
+            else
+              Invalid(runId, UnsupportedCommandIssue("Invalid operation"))
+
+          case _ =>
+            Invalid(runId, UnsupportedCommandIssue("Unsupported command"))
         }
-        else {
-          log.error("LgmHcd : Gripper is already at target position")
 
-          val stage  = LgmInfo.stageKey.set("Validation")
-          val status = LgmInfo.statusKey.set("Failure")
-          val event  = SystemEvent(componentInfo.prefix, EventName("LgmHcd_status")).madd(stage, status)
-          publisher.publish(event)
+      case _: Observe =>
+        Invalid(runId, WrongCommandTypeIssue("Only Setup supported"))
 
-          Invalid(runId, ParameterValueOutOfRangeIssue("LgmHcd : Hcd is already at target postion"))
-        }
-
-      }
-      case _: Observe => Invalid(runId, WrongCommandTypeIssue("LgmHcd accepts only setup commands"))
       case _ =>
-        Invalid(runId, UnsupportedCommandIssue("LgmHcd: Invalid command type"))
+        Invalid(runId, UnsupportedCommandIssue("Invalid command"))
     }
   }
 
   override def onSubmit(runId: Id, controlCommand: ControlCommand): SubmitResponse = {
     log.info(s"LgmHcd : Handling command with runId - $runId")
     controlCommand match {
-      case setup: Setup => onSetup(runId, setup)
-      case _            => Invalid(runId, UnsupportedCommandIssue("LgmHcd : Inavlid Command received"))
+      case setup: Setup =>
+        setup.commandName match {
+          case CommandName("move") =>
+            onSetup(runId, setup)
+          case CommandName("update") =>
+            onUpdate(runId, setup)
+          case _ =>
+            Invalid(runId, UnsupportedCommandIssue("Unsupported command name"))
+        }
+      case _ => Invalid(runId, UnsupportedCommandIssue("LgmHcd : Inavlid Command received"))
     }
   }
 
@@ -91,18 +123,19 @@ class LgmhcdHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswContext
     val delay: Int                               = 10
     val targetGratingPosition: Parameter[Double] = setup(LgmInfo.targetGratingPositionKey)
 
-    log.info(s"LgmHcd : Grating Magazine is at ${LgmInfo.currentPosition.head}cm")
+    log.info(s"LgmHcd : Grating Magazine is at ${lgmState.currentPosition}cm")
 
-    while (LgmInfo.currentPosition.head != LgmInfo.gratingExchangePosition.head - targetGratingPosition.head) {
-      LgmInfo.currentPosition = LgmInfo.currentPositionKey.set(
-        if (LgmInfo.currentPosition.head < LgmInfo.gratingExchangePosition.head - targetGratingPosition.head)
-          LgmInfo.currentPosition.head + 0.5 // Move forward by 0.5 units
-        else
-          LgmInfo.currentPosition.head - 0.5 // Move backward by 0.5 units
+    while (lgmState.currentPosition != targetGratingPosition.head) {
+      lgmState = lgmState.copy(
+        currentPosition =
+          if (lgmState.currentPosition < targetGratingPosition.head)
+            lgmState.currentPosition + 0.5
+          else
+            lgmState.currentPosition - 0.5
       )
 
-      if (LgmInfo.currentPosition.head % 10 == 0) {
-        val message = s"LgmHcd : Moving gripper to ${LgmInfo.currentPosition.head}"
+      if (lgmState.currentPosition % 10 == 0) {
+        val message = s"LgmHcd : Moving gripper to ${lgmState.currentPosition}"
         // Create and publish the event
         val event = createMovementEvent(message)
         publisher.publish(event)
@@ -111,15 +144,15 @@ class LgmhcdHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswContext
     }
 
     // Update the gratingMap corresponding to the target grating position (denoting the grating is taken out)
-    val gratingIndex = LgmInfo.gratingLinearDistance.indexOf(targetGratingPosition.head)
-    if (gratingIndex >= 0) {
-      LgmInfo.gratingMap(gratingIndex) = 0 // Mark the grating as taken out
-      println(s"Grating at index $gratingIndex has been taken out.")
-    }
 
-    val stage  = LgmInfo.stageKey.set("Setup")
-    val status = LgmInfo.statusKey.set("Completed")
-    val event  = SystemEvent(componentInfo.prefix, EventName("LgmHcd_status")).madd(stage, status)
+    val stage             = LgmInfo.stageKey.set("Setup")
+    val status            = LgmInfo.statusKey.set("Completed")
+    val currentPoitionlgm = LgmInfo.currentPositionKey.set(lgmState.currentPosition)
+//    val emptySlot=LgmInfo.emptySlotKey.set(lgmState.emptySlot)
+//    val emptySlotBgid=LgmInfo.emptySlotBgidKey.set(lgmState.emptySlotBgid)
+//    val linearDistance=LgmInfo.gratingLinearDistanceKey.set(lgmState.emptySlotLinearDistance)
+//    val slotIndex=LgmInfo.emptySlotIndexKey.set(lgmState.emptySlotIndex)
+    val event = SystemEvent(componentInfo.prefix, EventName("LgmHcd_status")).madd(stage, status, currentPoitionlgm)
     publisher.publish(event)
     Completed(runId)
   }
@@ -134,6 +167,116 @@ class LgmhcdHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswContext
 
   override def onShutdown(): Unit = {
     log.info("shutting Down")
+  }
+// helper methods
+
+  private def getIndex(position: Double): Int = {
+    LgmInfo.gratingLinearDistance.indexWhere(d => Math.abs(d - position) < 0.001)
+  }
+
+  private def getBgid(index: Int): String = {
+    s"bgid${index + 1}"
+  }
+
+  private def isSlotEmpty(index: Int): Boolean = {
+    LgmInfo.gratingMap(index) == 0
+  }
+
+  private def handleGratingPush(): Unit = {
+    val index = getIndex(lgmState.currentPosition)
+    if (index >= 0) {
+      val bgid           = getBgid(index)
+      val linearDistance = LgmInfo.gratingLinearDistance(index)
+
+      //  mark slot EMPTY
+      LgmInfo.gratingMap(index) = 0
+
+      lgmState = lgmState.copy(
+        emptySlot = true,
+        emptySlotBgid = Some(bgid),
+        emptySlotLinearDistance = Some(linearDistance),
+        emptySlotIndex = Some(index)
+      )
+
+      log.info(s"PUSH → Slot emptied at index $index, bgid = $bgid")
+      publishLgmStatus(
+        stage = "PUSH",
+        status = "Completed"
+      )
+
+    }
+    else {
+      log.error("Invalid position during PUSH")
+    }
+  }
+
+  private def handleGratingPull(): Unit = {
+    val index = getIndex(lgmState.currentPosition)
+    if (index >= 0) {
+      val bgid           = getBgid(index)
+      val linearDistance = LgmInfo.gratingLinearDistance(index)
+
+      // mark slot FILLED
+      LgmInfo.gratingMap(index) = 1
+
+      lgmState = lgmState.copy(
+        emptySlot = false,
+        emptySlotBgid = None,
+        emptySlotLinearDistance = None,
+        emptySlotIndex = None
+      )
+      log.info(s"PULL → Slot filled at index $index, bgid = $bgid")
+      publishLgmStatus(
+        stage = "PULL",
+        status = "Completed"
+      )
+    }
+    else {
+      log.error("Invalid position during PULL")
+    }
+  }
+
+  private def publishLgmStatus(stage: String, status: String): Unit = {
+
+    // Step 1: base event (always present fields)
+    var event =
+      SystemEvent(prefix, EventName("LgmStatusEvent"))
+        .add(LgmInfo.stageKey.set(stage))
+        .add(LgmInfo.statusKey.set(status))
+        .add(LgmInfo.currentPositionKey.set(lgmState.currentPosition))
+        .add(LgmInfo.emptySlotKey.set(lgmState.emptySlot))
+
+    // Step 2: add slot details only when emptySlot = true
+    if (lgmState.emptySlot) {
+
+      lgmState.emptySlotBgid.foreach { bgid =>
+        event = event.add(LgmInfo.emptySlotBgidKey.set(bgid))
+      }
+
+      lgmState.emptySlotLinearDistance.foreach { distance =>
+        event = event.add(LgmInfo.emptySlotLinearDistanceKey.set(distance))
+      }
+
+      lgmState.emptySlotIndex.foreach { index =>
+        event = event.add(LgmInfo.emptySlotIndexKey.set(index))
+      }
+    }
+
+    // Step 3: publish
+    publisher.publish(event)
+
+    log.info(s"LGM Status Event Published → $lgmState")
+  }
+
+  private def onUpdate(runId: Id, setup: Setup): SubmitResponse = {
+
+    val operation = setup(LgmInfo.operationKey).head
+
+    operation match {
+      case "PUSH" => handleGratingPush()
+      case "PULL" => handleGratingPull()
+    }
+    Completed(runId)
   }
 
   override def onGoOffline(): Unit = {}

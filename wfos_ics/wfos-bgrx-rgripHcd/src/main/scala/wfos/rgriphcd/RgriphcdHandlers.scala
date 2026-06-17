@@ -10,17 +10,18 @@ import csw.alarm.models.Key.AlarmKey
 import csw.alarm.api.scaladsl.{AlarmAdminService, AlarmService, AlarmSubscription}
 import csw.alarm.models.AlarmSeverity.Okay
 import csw.prefix.models.Prefix
-import csw.params.commands.CommandResponse._
-import csw.params.core.models.{Id}
+import csw.params.commands.CommandResponse.*
+import csw.params.core.models.Id
 import csw.params.commands.CommandIssue.{ParameterValueOutOfRangeIssue, UnsupportedCommandIssue, WrongCommandTypeIssue}
-import csw.params.commands.{ControlCommand, CommandName, Observe, Setup}
-
-import csw.params.core.generics.{Parameter}
+import csw.params.commands.{CommandName, ControlCommand, Observe, Setup}
+import csw.params.core.generics.Parameter
 import csw.time.core.models.UTCTime
 
 import scala.concurrent.{ExecutionContextExecutor, Future}
 import wfos.rgriphcd.RgripInfo
-import csw.params.events.{SystemEvent, EventName}
+
+import csw.params.events.{Event, EventKey, EventName, SystemEvent}
+import wfos.rgriphcd.RgripState
 
 /**
  * Domain specific logic should be written in below handlers.
@@ -33,15 +34,50 @@ import csw.params.events.{SystemEvent, EventName}
 class RgriphcdHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswContext) extends ComponentHandlers(ctx, cswCtx) {
 
   import cswCtx._
+
   implicit val ec: ExecutionContextExecutor = ctx.executionContext
   private val log                           = loggerFactory.getLogger
   private val prefix                        = cswCtx.componentInfo.prefix
   private val publisher                     = eventService.defaultPublisher
   private val clientAPI                     = cswCtx.alarmService
 
+  // rgrip state variables
+  private var rstate = RgripState(
+    currentAngle = 28,
+    hasGrating = true,
+    gratingId = Some("bgid2")
+  )
+
+  private def handlePactEvent(event: Event): Unit = {
+    val operation = "push" // PUSH / PULL
+    operation match {
+      case "PUSH" =>
+        log.info("============= rgrip recived pact push event and rgrip is updating its state ")
+      // update LGM → slot empty and send command to rgrip and lgmhcd
+      // sendPushPullStatusToHcds("PUSH")
+      // update RGRIP → has grating
+
+      case "PULL" =>
+        log.info("==================== Rgrip recived pact pull event and rgrip updating its stste ")
+      // update LGM → slot filled and send command to lgmhcd and rgrip
+      // sendPushPullStatusToHcds("PULL")
+      // update RGRIP → empty
+    }
+  }
+
   // Called when the component is created
   override def initialize(): Unit = {
     log.info(s"Initializing $prefix")
+    val pactPushPullEventKey = EventKey(Prefix("wfos.bgrxAssembly.pacthcd"), EventName("pactPushPullEventone"))
+
+    val subscriber = eventService.defaultSubscriber
+    subscriber.subscribeCallback(
+      Set(pactPushPullEventKey),
+      event => {
+        log.info("pact sent push pull event ")
+        // handlePactEvent(event)
+      }
+    )
     // log.info(s"RgripHcd : Checking if $prefix is at home position")
 
     // val ik: Key[Int]            = KeyType.IntKey.make("IKey")
@@ -49,7 +85,7 @@ class RgriphcdHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswConte
     // log.info(s"IK value : ${ikValue.value(0)}")
 
     log.info(
-      s"RgripHcd : Exchange Position - ${RgripInfo.exchangeAngle.values.head}, Current Position - ${RgripInfo.currentAngle.values.head}"
+      s"RgripHcd : Exchange Position - ${RgripInfo.exchangeAngle.head}, Current Position - ${rstate.currentAngle}"
     )
     // if (RgripInfo.currentAngle.values.head != RgripInfo.homeAngle.values.head) {
     //   log.error("RgripHcd : gripper is not at the exchange position")
@@ -80,37 +116,44 @@ class RgriphcdHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswConte
   override def validateCommand(runId: Id, controlCommand: ControlCommand): ValidateCommandResponse = {
     log.info(s"RgripHcd: Command($runId) is being validated")
     controlCommand match {
-      case setup: Setup => {
-        val targetAngle = setup(RgripInfo.targetAngleKey)
-        if (targetAngle.head != RgripInfo.currentAngle.head) {
-          log.info("RgripHcd : Validation Successful")
-          Accepted(runId)
+      case setup: Setup =>
+        setup.commandName match {
+          case CommandName("move") =>
+            val targetAngle = setup(RgripInfo.targetAngleKey).head
+            if (targetAngle >= 0 && targetAngle <= 55)
+              Accepted(runId)
+            else {
+              log.error("rgrip validation failed target angle is not in valid range")
+              val stage  = RgripInfo.stageKey.set("Validation")
+              val status = RgripInfo.statusKey.set("Failure")
+              val event  = SystemEvent(prefix, EventName("RgripHcd_status")).madd(stage, status)
+              publisher.publish(event)
+              Invalid(runId, ParameterValueOutOfRangeIssue("Invalid angle"))
+            }
+          case CommandName("update") =>
+            val op = setup(RgripInfo.operationKey).head
+            if (op == "PUSH" || op == "PULL")
+              Accepted(runId)
+            else
+              Invalid(runId, UnsupportedCommandIssue("Invalid operation"))
+          case _ => Invalid(runId, UnsupportedCommandIssue("Invalid operation"))
         }
-        else if (targetAngle.head == RgripInfo.currentAngle.head) {
-          log.info("RgripHcd : Validation Successful RgripHcd : gripper is already at target angle ")
-          Accepted(runId)
-        }
-        else {
-          log.error(s"RgripHcd: Gripper is already at target position")
-          val stage  = RgripInfo.stageKey.set("Validation")
-          val status = RgripInfo.statusKey.set("Failure")
-          val event  = SystemEvent(componentInfo.prefix, EventName("RgripHcd_status")).madd(stage, status)
-          publisher.publish(event)
-
-          Invalid(runId, ParameterValueOutOfRangeIssue("RgripHcd: Gripper is already at target angle"))
-        }
-      }
       case _: Observe => Invalid(runId, WrongCommandTypeIssue("RgripHcd accepts only setup commands"))
       case _ =>
-        Invalid(runId, UnsupportedCommandIssue("RgripHcd: Invalid command type"))
+        Invalid(runId, UnsupportedCommandIssue("Invalid command"))
     }
   }
 
   override def onSubmit(runId: Id, controlCommand: ControlCommand): SubmitResponse = {
     log.info(s"RgripHcd: handling command: runid - $runId")
     controlCommand match {
-      case setup: Setup => onSetup(runId, setup)
-      case _            => Invalid(runId, UnsupportedCommandIssue("RgripHcd: Inavlid Command received"))
+      case setup: Setup =>
+        setup.commandName match {
+          case CommandName("move")   => onSetup(runId, setup)
+          case CommandName("update") => onUpdate(runId, setup)
+          case _                     => Invalid(runId, UnsupportedCommandIssue("Unsupported command"))
+        }
+      case _ => Invalid(runId, UnsupportedCommandIssue("unsupported command "))
     }
   }
 
@@ -118,23 +161,23 @@ class RgriphcdHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswConte
     val alarmKey                    = AlarmKey(Prefix("wfos.bgrxAssembly.rgriphcd"), "alarmTriggeredOnRgrip")
     val resultF: Future[Done]       = clientAPI.setSeverity(alarmKey, Okay)
     val targetAngle: Parameter[Int] = setup(RgripInfo.targetAngleKey)
-    if (RgripInfo.currentAngle.head == targetAngle.head) {
+    if (rstate.currentAngle == targetAngle.head) {
       Completed(runId)
     }
     else {
       log.info(s"RgripHcd: Executing the received command: runid - $runId")
       val delay: Int = 500
-      log.info(s"RgripHcd: Gripper is at ${RgripInfo.currentAngle.head} degrees")
+      log.info(s"RgripHcd: Gripper is at ${rstate.currentAngle} degrees")
 
       // Started(runId)
 
-      if (RgripInfo.currentAngle.head > targetAngle.head) {
+      if (rstate.currentAngle > targetAngle.head) {
         var timeElapsed = 0L // Variable to track elapsed time
-        while (RgripInfo.currentAngle.head != targetAngle.head) {
-          RgripInfo.currentAngle = RgripInfo.currentAngleKey.set(RgripInfo.currentAngle.head - 1)
-          log.info(s"RgripHcd: Rotating gripper to ${RgripInfo.currentAngle.head}")
+        while (rstate.currentAngle != targetAngle.head) {
+          rstate = rstate.copy(currentAngle = rstate.currentAngle - 1)
+          log.info(s"RgripHcd: Rotating gripper to ${rstate.currentAngle}")
           // Publish the rotation event
-          onRotation(runId, RgripInfo.currentAngle.head)
+          onRotation(runId, rstate.currentAngle)
 
           // Check if 9 seconds have elapsed since loop start
           val currentTime = System.currentTimeMillis()
@@ -145,13 +188,13 @@ class RgriphcdHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswConte
           Thread.sleep(delay)
         }
       }
-      else if (RgripInfo.currentAngle.head < targetAngle.head) {
+      else if (rstate.currentAngle < targetAngle.head) {
         var timeElapsed = 0L // Variable to track elapsed time
-        while (RgripInfo.currentAngle.head != targetAngle.head) {
-          RgripInfo.currentAngle = RgripInfo.currentAngleKey.set(RgripInfo.currentAngle.head + 1)
+        while (rstate.currentAngle != targetAngle.head) {
+          rstate = rstate.copy(currentAngle = rstate.currentAngle + 1)
           // log.info(s"RgripHcd: Rotating gripper to ${RgripInfo.currentAngle.head}")
           // Publish the rotation event
-          onRotation(runId, RgripInfo.currentAngle.head)
+          onRotation(runId, rstate.currentAngle)
 
           // Check if 9 seconds have elapsed since loop start
           val currentTime = System.currentTimeMillis()
@@ -169,6 +212,9 @@ class RgriphcdHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswConte
       val event  = SystemEvent(componentInfo.prefix, EventName("RgripHcd_status")).madd(stage, status)
       publisher.publish(event)
 
+      // calling rgrip status event
+      publishRgripStatus("Setup", "Completed")
+
       Completed(runId)
     }
   }
@@ -176,13 +222,60 @@ class RgriphcdHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswConte
   private def createRotationEvent(angle: Int): SystemEvent = {
     // Create a SystemEvent representing the rotation of the gripper
     SystemEvent(componentInfo.prefix, EventName("RgripRotationEvent"))
-      .madd(RgripInfo.angleKey.set(angle))
+      .add(RgripInfo.currentAngleKey.set(angle))
   }
 
   private def onRotation(runId: Id, angle: Int): Unit = {
     // Publish the rotation event
     val event = createRotationEvent(angle)
     publisher.publish(event)
+  }
+
+  // rgrip status event
+  private def publishRgripStatus(stage: String, status: String): Unit = {
+
+    var event =
+      SystemEvent(prefix, EventName("RgripStatusEvent"))
+        .add(RgripInfo.stageKey.set(stage))
+        .add(RgripInfo.statusKey.set(status))
+        .add(RgripInfo.currentAngleKey.set(rstate.currentAngle))
+        .add(RgripInfo.rgripHasGratingKey.set(rstate.hasGrating))
+
+    // ✅ add only if present
+    if (rstate.hasGrating) {
+      rstate.gratingId.foreach { id =>
+        event = event.add(RgripInfo.rgripGratingIdKey.set(id))
+      }
+    }
+
+    publisher.publish(event)
+  }
+
+  private def onUpdate(runId: Id, setup: Setup): SubmitResponse = {
+    val operation = setup(RgripInfo.operationKey).head
+    val gratingIdOpt =
+      if (setup.exists(RgripInfo.gratingModeKey))
+        Some(setup(RgripInfo.gratingModeKey).head)
+      else None
+    operation match {
+      case "PUSH" =>
+        // 🔹 grating comes INTO RGRIP
+        rstate = rstate.copy(
+          hasGrating = true,
+          gratingId = gratingIdOpt // later from assembly
+        )
+        log.info(s"RGRIP PUSH → holding grating ${rstate.gratingId}")
+        publishRgripStatus("PUSH", "Completed")
+      case "PULL" =>
+        // 🔹 grating goes OUT of RGRIP
+        rstate = rstate.copy(
+          hasGrating = false,
+          gratingId = None
+        )
+        log.info("RGRIP PULL → grating removed")
+        publishRgripStatus("PULL", "Completed")
+    }
+    Completed(runId)
   }
 
   override def onOneway(runId: Id, controlCommand: ControlCommand): Unit = {}
