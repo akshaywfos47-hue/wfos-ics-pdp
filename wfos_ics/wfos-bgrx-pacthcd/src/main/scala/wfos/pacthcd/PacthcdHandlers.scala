@@ -11,6 +11,7 @@ import csw.params.commands.CommandIssue.{MissingKeyIssue, ParameterValueOutOfRan
 import csw.params.commands.{CommandName, ControlCommand, Observe, Setup}
 import csw.time.core.models.UTCTime
 import csw.params.events.{EventName, SystemEvent}
+import scala.util.{Success, Failure}
 
 import scala.concurrent.ExecutionContextExecutor
 import wfos.pacthcd.{PactInfo, PactState}
@@ -152,6 +153,7 @@ class PacthcdHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswContex
     if (math.abs(state.currentPosition - homePos) <= EPSILON) {
       log.info(s"PactHcd [homing]: already at home position ($homePos mm) – completing immediately")
       publishStatusEvent("homing", "Completed")
+      log.info(s"pact publishes pact status event ")
       return Completed(runId)
     }
 
@@ -162,6 +164,7 @@ class PacthcdHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswContex
 
     // pactPushPullEvent must NOT fire during homing (operation is "idle")
     publishStatusEvent("homing", "Completed")
+    log.info(s"pact publishes pact status event out side if block")
     Completed(runId)
   }
 
@@ -246,15 +249,23 @@ class PacthcdHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswContex
     if (math.abs(pos - IN) <= EPSILON) "IN" else "OUT"
 
   private def publishStatusEvent(stage: String, status: String): Unit = {
-    publisher.publish(
-      SystemEvent(componentInfo.prefix, EventName("PactStatusEvent"))
-        .madd(
-          PactInfo.stageKey.set(stage),
-          PactInfo.statusKey.set(status),
-          PactInfo.currentPositionKey.set(state.currentPosition),
-          PactInfo.operationKey.set(state.operation)
-        )
-    )
+    log.info(s"Publishing with prefix = ${componentInfo.prefix}")
+    publisher
+      .publish(
+        SystemEvent(componentInfo.prefix, EventName("PactStatusEvent"))
+          .madd(
+            PactInfo.stageKey.set(stage),
+            PactInfo.statusKey.set(status),
+            PactInfo.currentPositionKey.set(state.currentPosition),
+            PactInfo.operationKey.set(state.operation)
+          )
+      )
+      .onComplete {
+        case Success(_) =>
+          log.info("PactStatusEvent published successfully")
+        case Failure(ex) =>
+          log.error(s"Failed to publish PactStatusEvent: ${ex.getMessage}")
+      }(ec)
   }
 
   /**

@@ -10,7 +10,15 @@ object Dependencies {
     "org.apache.pekko" %% "pekko-cluster-tools" % "1.1.3",
     "org.apache.pekko" %% "pekko-distributed-data" % "1.1.3",
     "org.apache.pekko" %% "pekko-coordination" % "1.1.3",
-    "org.apache.pekko" %% "pekko-serialization-jackson" % "1.1.3"
+    "org.apache.pekko" %% "pekko-serialization-jackson" % "1.1.3",
+
+    // pekko http dependencies
+    "org.apache.pekko" %% "pekko-stream" % "1.1.3",
+    "org.apache.pekko" %% "pekko-http" % "1.1.0",
+    "org.apache.pekko" %% "pekko-http-spray-json" % "1.1.0",
+    "org.apache.pekko" %% "pekko-http-cors" % "1.1.0"
+
+
   )
 
   val loggingDependencies = Seq(

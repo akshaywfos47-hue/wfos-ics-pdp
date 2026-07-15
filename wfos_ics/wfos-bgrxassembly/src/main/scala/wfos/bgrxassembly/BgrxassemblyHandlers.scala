@@ -1,7 +1,9 @@
 package wfos.bgrxassembly
 
 import org.apache.pekko.Done
+import scala.util.{Success, Failure}
 import org.apache.pekko.actor.typed.ActorSystem
+import org.apache.pekko.actor.typed.ActorRef
 import com.typesafe.config._
 import org.apache.pekko.actor.typed.scaladsl.ActorContext
 import csw.command.client.messages.TopLevelActorMessage
@@ -32,12 +34,20 @@ import wfos.lgmhcd.{LgmInfo, LgmState}
 import wfos.pacthcd.{PactInfo, PactState}
 import wfos.bgrxassembly.components.{RgripHcd, LgripHcd, Lgmhcd}
 import csw.params.events.{EventKey, EventName, Event, SystemEvent}
-
+import wfos.bgrxassembly.TelemetryManager
+import wfos.bgrxassembly.AlarmManager
+import wfos.bgrxassembly.BgrxValidator
 import org.apache.pekko.util.Timeout
 import scala.concurrent.duration._
 import scala.concurrent.Await
+import wfos.bgrxassembly.SequenceType
+import wfos.bgrxassembly.Step
+import Step.*
+import wfos.bgrxassembly.api.{AssemblyApi, BgrxApiService, BgrxRoutes, BgrxHttpServer}
 
-class BgrxassemblyHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswContext) extends ComponentHandlers(ctx, cswCtx) {
+class BgrxassemblyHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswContext)
+    extends ComponentHandlers(ctx, cswCtx)
+    with AssemblyApi {
 
   import cswCtx._
   implicit val ec: ExecutionContextExecutor         = ctx.executionContext
@@ -59,11 +69,13 @@ class BgrxassemblyHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswC
   private val alarmAdminAPI: AlarmAdminService =
     new AlarmServiceFactory().makeAdminApi(locationService)
 
-  // ── Assembly state cache ───────────────────────────────────────────────────
-  private var rgripState: RgripState = RgripState.initial
-  private var lgripState: LgripState = LgripState.initial
-  private var lgmState: LgmState     = LgmState.initial
-  private var pactState: PactState   = PactState.initial
+  //  // ── Assembly state cache ───────────────────────────────────────────────────
+  //  private var rgripState: RgripState = RgripState.initial
+  //  private var lgripState: LgripState = LgripState.initial
+  //  private var lgmState: LgmState     = LgmState.initial
+  //  private var pactState: PactState   = PactState.initial
+  //  // assembly state cache code is removed because we are using state
+  //  // variables in one file ie AssemblyState.scala
 
   // After pactHcd reaches OUT, gratingTransferEvent is published. The next
   // sequence step must NOT proceed until lgmHcd confirms it has processed that
@@ -77,15 +89,263 @@ class BgrxassemblyHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswC
   //       proceeds to lgrip→home and rgrip→observation angle
   private var onReturnTransferComplete: Option[() => Unit] = None
   private var onPickupTransferComplete: Option[() => Unit] = None
-
   // Set by homingSequence once all 4 HCDs have completed homing.
   // When the boot sequence triggers homing first, this continuation
   // fires the Return → Pickup chain after homing is fully done.
   private var onHomingComplete: Option[() => Unit] = None
 
+  // http routes layer
+  private var apiService: BgrxApiService = _
+  private var routes: BgrxRoutes         = _
+
+  // manager class
+  private val assemblyState = new AssemblyState()
+  private val telemetryManager =
+    new TelemetryManager(
+      loggerFactory,
+      assemblyState,
+      () => isSequenceRunning,
+      () => currentStep,
+      publishGratingTransferEvent,
+      completeReturnTransfer,
+      completePickupTransfer
+    )
+
+  private val alarmManger = new AlarmManager()
+
+  private val bgrxValidator = new BgrxValidator(loggerFactory)
+
+  // spawning telementry actor
+  private val telemetryEventActor: ActorRef[Event] =
+    ctx.spawn(
+      TelemetryEventActor(telemetryManager),
+      "telemetry-event-actor"
+    )
+
+  // =====================================================
+  // 1. Sequence Types
+  // =====================================================
+
+  // =====================================================
+  // 2. Sequence State
+  // =====================================================
+  private var sequenceRunning: Boolean              = false
+  private var currentSequence: Option[SequenceType] = None
+  private var currentStepIndex: Int                 = 0
+
+  def isSequenceRunning: Boolean =
+    sequenceRunning
+
+  private def currentStep: Step =
+    getSequence(currentSequence.get)(currentStepIndex)
+  // =====================================================
+  // 3. Sequence Definitions
+  // =====================================================
+
+  private val homeSequence: List[Step] =
+    List(PACT, LGM, LGRIP, RGRIP)
+
+  private val returnSequence: List[Step] =
+    List(RGRIP, LGRIP, LGM, PACT)
+
+  private val pickupSequence: List[Step] =
+    List(RGRIP, LGRIP, LGM, PACT, LGRIP, RGRIP)
+
+  private val exchangeSequence: List[Step] =
+    returnSequence ++ pickupSequence
+
+  // =====================================================
+  // 4. Sequence Helper
+  // =====================================================
+
+  private def getSequence(sequenceType: SequenceType): List[Step] =
+    sequenceType match {
+      case SequenceType.HOME     => homeSequence
+      case SequenceType.RETURN   => returnSequence
+      case SequenceType.PICKUP   => pickupSequence
+      case SequenceType.EXCHANGE => exchangeSequence
+    }
+
+  private def executeCurrentStep(runId: Id): Unit = {
+
+    val sequence = getSequence(currentSequence.get)
+
+    // Check whether the sequence has completed
+    if (currentStepIndex >= sequence.length) {
+      log.info(s"$currentSequence sequence completed")
+      sequenceRunning = false
+      currentSequence = None
+      currentStepIndex = 0
+      return
+    }
+
+    val step = sequence(currentStepIndex)
+
+    if (
+      !bgrxValidator.validateCurrentStep(
+        currentSequence.get,
+        step,
+        assemblyState
+      )
+    ) {
+      recoverCurrentStep(runId, step)
+      return
+    }
+
+    val command =
+      BgrxCommandBuilder.buildCommand(
+        currentSequence.get,
+        step,
+        sourcePrefix,
+        obsId,
+        assemblyState
+      )
+
+    sendCurrentStep(runId, step, command)
+  }
+
+  private def sendCurrentStep(runId: Id, step: Step, command: Setup): Unit = {
+
+    val hcdName = step match {
+      case Step.PACT  => "pacthcd"
+      case Step.LGM   => "lgmhcd"
+      case Step.LGRIP => "lgriphcd"
+      case Step.RGRIP => "rgriphcd"
+    }
+
+    resolveAndSubmit(hcdName, command, runId) { case _: Completed =>
+      currentStepIndex += 1
+      executeCurrentStep(runId)
+    }
+  }
+
+  // api entry point
+  def executeSequence(sequence: SequenceType): Unit = {
+    startExecution(
+      Id("ui"),
+      sequence
+    )
+  }
+
+  private def startExecution(
+      runId: Id,
+      sequence: SequenceType
+  ): Unit = {
+
+    sequenceRunning = true
+    currentSequence = Some(sequence)
+    currentStepIndex = 0
+
+    executeCurrentStep(runId)
+  }
+
+  private def recoverCurrentStep(
+      runId: Id,
+      step: Step
+  ): Unit = {
+
+    currentSequence.get match {
+
+      // =====================================================
+      // HOME
+      // =====================================================
+
+      case SequenceType.HOME =>
+        step match {
+
+          case Step.PACT =>
+            log.info("HOME Recovery: PACT is the first step. No recovery required.")
+
+          case Step.LGM =>
+            log.info("HOME Recovery: Validation failed for LGM. Recover by moving PACT to HOME, then retry LGM.")
+
+          case Step.LGRIP =>
+            log.info("HOME Recovery: Validation failed for LGRIP. Recover by moving LGM to HOME, then retry LGRIP.")
+
+          case Step.RGRIP =>
+            log.info("HOME Recovery: Validation failed for RGRIP. Recover by moving LGRIP to HOME, then retry RGRIP.")
+        }
+
+      // =====================================================
+      // PICKUP
+      // =====================================================
+
+      case SequenceType.PICKUP =>
+        step match {
+
+          case Step.RGRIP =>
+          // TODO
+
+          case Step.LGRIP =>
+          // TODO
+
+          case Step.LGM =>
+          // TODO
+
+          case Step.PACT =>
+          // TODO
+        }
+
+      // =====================================================
+      // RETURN
+      // =====================================================
+
+      case SequenceType.RETURN =>
+        step match {
+
+          case Step.RGRIP =>
+          // TODO
+
+          case Step.LGRIP =>
+          // TODO
+
+          case Step.LGM =>
+          // TODO
+
+          case Step.PACT =>
+          // TODO
+        }
+
+      // =====================================================
+      // EXCHANGE
+      // =====================================================
+
+      case SequenceType.EXCHANGE =>
+        step match {
+
+          case Step.RGRIP =>
+          // TODO
+
+          case Step.LGRIP =>
+          // TODO
+
+          case Step.LGM =>
+          // TODO
+
+          case Step.PACT =>
+          // TODO
+        }
+    }
+  }
+
+  private def initializeClass(): Unit = {
+    telemetryManager()
+    alarmManger()
+    // Create API objects
+    apiService = new BgrxApiService(this)
+    routes = new BgrxRoutes(apiService)
+
+    val httpServer =
+      new BgrxHttpServer(ctx.system, routes)
+
+    httpServer.start()
+  }
   // ── Lifecycle ───────────────────────────────────────────────────────────────
   override def initialize(): Unit = {
-    log.info("Initializing BgrxAssembly")
+    log.info("Initializing BgrxAssembly with  ")
+    initializeClass()
+    log.info(s"Assembly sourcePrefix = $sourcePrefix")
+
     // Register alarm keys in the CSW Alarm Store before any HCD command runs.
     // HCDs call setSeverity on their first move; if the store isn't populated
     // yet they throw KeyNotFoundException.
@@ -125,8 +385,14 @@ class BgrxassemblyHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswC
     }
     if (rgripHcdCS.isDefined && lgripHcdCS.isDefined && lgmHcdCS.isDefined && pactHcdCS.isDefined) {
       log.info("Bgrx Assembly : All HCDs successfully initialized")
+
+      subscribeToHcdEvents()
       if (!sys.props.getOrElse("wfos.test.mode", "false").toBoolean) {
-        sendCommand(Id("bgrx")): Unit
+//        startExecution(
+//          Id("bgrx"),
+//          SequenceType.HOME
+//        )
+        //    sendCommand(Id("bgrx"))
       }
       else {
         log.info("Bgrx Assembly : test mode – skipping boot sequence")
@@ -192,7 +458,7 @@ class BgrxassemblyHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswC
             // Only pre-condition: rgrip must currently be holding a grating.
             // No need to validate targetAngle/cw – those are not supplied for return.
             // bgid is read from rgripState.gratingId inside the sequence.
-            if (!rgripState.hasGrating)
+            if (!assemblyState.rgripState.hasGrating)
               Invalid(runId, UnsupportedCommandIssue(s"gratingReturn rejected: rgripHcd is not holding a grating (hasGrating=false)"))
             else
               Accepted(runId)
@@ -214,8 +480,6 @@ class BgrxassemblyHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswC
   override def onSubmit(runId: Id, controlCommand: ControlCommand): SubmitResponse = {
     log.info(s"Bgrx Assembly : handling command $runId")
 
-    subscribeToHcdEvents()
-
     controlCommand match {
       case setup: Setup =>
         setup.commandName match {
@@ -235,189 +499,73 @@ class BgrxassemblyHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswC
     val subscriber = eventService.defaultSubscriber
 
     // ── rgrip ──────────────────────────────────────────────────────────────────
-    subscriber.subscribeCallback(
+//    subscriber.subscribeCallback(
+//      Set(EventKey(Prefix("wfos.bgrxAssembly.rgriphcd"), EventName("RgripRotationEvent"))),
+//      event =>
+//        telemetryManager.eventServiceHelper(event)
+//        event match {
+//          case sysEvent: SystemEvent =>
+//            val angle = sysEvent(RgripInfo.angleKey).head
+//            rgripState = rgripState.copy(currentAngle = angle)
+//            log.info(s" %%%%%%%%%%%%%%% in assembly Assembly [RgripRotationEvent]: rgrip at $angle°")
+//          case _ =>
+//        }
+//    )
+
+    log.info("Subscribed to PactStatusEvent")
+
+    subscriber.subscribeActorRef(
       Set(EventKey(Prefix("wfos.bgrxAssembly.rgriphcd"), EventName("RgripRotationEvent"))),
-      event =>
-        event match {
-          case sysEvent: SystemEvent =>
-            val angle = sysEvent(RgripInfo.angleKey).head
-            rgripState = rgripState.copy(currentAngle = angle)
-            log.info(s"Assembly [RgripRotationEvent]: rgrip at $angle°")
-          case _ =>
-        }
+      telemetryEventActor
     )
-    subscriber.subscribeCallback(
+
+    subscriber.subscribeActorRef(
       Set(EventKey(Prefix("wfos.bgrxAssembly.rgriphcd"), EventName("rgripStateEvent"))),
-      event =>
-        event match {
-          case sysEvent: SystemEvent =>
-            val angle      = sysEvent(RgripInfo.currentAngleKey).head
-            val hasGrating = sysEvent(RgripInfo.hasGratingKey).head
-            val gratingId  = sysEvent(RgripInfo.gratingIdKey).head
-            val operation  = sysEvent(RgripInfo.operationKey).head
-            rgripState = RgripState(
-              currentAngle = angle,
-              hasGrating = hasGrating,
-              gratingId = if (hasGrating && gratingId.nonEmpty) Some(gratingId) else None,
-              operation = operation
-            )
-            log.info(s"Assembly [rgripStateEvent]: angle=$angle°, hasGrating=$hasGrating, gratingId=$gratingId")
-          case _ =>
-        }
+      telemetryEventActor
     )
 
     // ── lgrip ──────────────────────────────────────────────────────────────────
-    subscriber.subscribeCallback(
+    subscriber.subscribeActorRef(
       Set(EventKey(Prefix("wfos.bgrxAssembly.lgriphcd"), EventName("lgripMoveToExchangePositionEvent"))),
-      event =>
-        event match {
-          case sysEvent: SystemEvent =>
-            val pos = sysEvent(LgripInfo.currentPositionKey).head
-            lgripState = lgripState.copy(currentPosition = pos)
-            log.info(s"Assembly [lgripMoveToExchangePositionEvent]: lgrip at $pos mm")
-          case _ =>
-        }
+      telemetryEventActor
     )
-    subscriber.subscribeCallback(
+
+    subscriber.subscribeActorRef(
       Set(EventKey(Prefix("wfos.bgrxAssembly.lgriphcd"), EventName("lgripMoveToHomePositionEvent"))),
-      event =>
-        event match {
-          case sysEvent: SystemEvent =>
-            val pos = sysEvent(LgripInfo.currentPositionKey).head
-            lgripState = lgripState.copy(currentPosition = pos)
-            log.info(s"Assembly [lgripMoveToHomePositionEvent]: lgrip at $pos mm")
-          case _ =>
-        }
+      telemetryEventActor
     )
-    subscriber.subscribeCallback(
+    subscriber.subscribeActorRef(
       Set(EventKey(Prefix("wfos.bgrxAssembly.lgriphcd"), EventName("lgripStateEvent"))),
-      event =>
-        event match {
-          case sysEvent: SystemEvent =>
-            val pos       = sysEvent(LgripInfo.currentPositionKey).head
-            val operation = sysEvent(LgripInfo.operationKey).head
-            lgripState = LgripState(currentPosition = pos, operation = operation)
-            log.info(s"Assembly [lgripStateEvent]: pos=$pos mm, op=$operation")
-          case _ =>
-        }
+      telemetryEventActor
     )
 
     // ── lgm ────────────────────────────────────────────────────────────────────
-    subscriber.subscribeCallback(
+    subscriber.subscribeActorRef(
       Set(EventKey(Prefix("wfos.bgrxAssembly.lgmhcd"), EventName("LgmMovementEvent"))),
-      event =>
-        event match {
-          case sysEvent: SystemEvent =>
-            val pos = sysEvent(LgmInfo.currentPositionKey).head
-            lgmState = lgmState.copy(currentPosition = pos)
-            log.info(s"Assembly [LgmMovementEvent]: lgm at $pos mm")
-          case _ =>
-        }
+      telemetryEventActor
     )
-    subscriber.subscribeCallback(
+
+    subscriber.subscribeActorRef(
       Set(EventKey(Prefix("wfos.bgrxAssembly.lgmhcd"), EventName("LgmStatusEvent"))),
-      event =>
-        event match {
-          case sysEvent: SystemEvent =>
-            val pos            = sysEvent(LgmInfo.currentPositionKey).head
-            val operation      = sysEvent(LgmInfo.operationKey).head
-            val emptySlot      = sysEvent(LgmInfo.emptySlotKey).head
-            val emptySlotIndex = sysEvent(LgmInfo.emptySlotIndexKey).head
-            val emptySlotBgid  = sysEvent(LgmInfo.emptySlotBgidKey).head
-            lgmState = lgmState.copy(
-              currentPosition = pos,
-              operation = operation,
-              emptySlot = emptySlot,
-              emptySlotIndex = if (emptySlot && emptySlotIndex >= 0) Some(emptySlotIndex) else None,
-              emptySlotBgid = if (emptySlot && emptySlotBgid.nonEmpty) Some(emptySlotBgid) else None
-            )
-            log.info(s"Assembly [LgmStatusEvent]: pos=$pos mm, emptySlot=$emptySlot, emptySlotBgid=$emptySlotBgid")
-
-            // LgmStatusEvent is the last event in the gratingTransferEvent chain
-            // (lgmHcd publishes it after updating its gratingMap). At this point
-            // both lgmHcd and rgripHcd have fully processed the transfer.
-            // Execute any pending continuation that was waiting for this confirmation.
-
-            onReturnTransferComplete.foreach { continuation =>
-              onReturnTransferComplete = None
-              log.info("Assembly [LgmStatusEvent]: gratingTransfer(pull) confirmed – executing return continuation")
-              // Delay so any in-flight rgripStateEvent settles before the next step reads rgripState
-              ctx.system.scheduler.scheduleOnce(Duration.ofMillis(10), () => continuation(), ec)
-            }
-
-            onPickupTransferComplete.foreach { continuation =>
-              onPickupTransferComplete = None
-              log.info("Assembly [LgmStatusEvent]: gratingTransfer(push) confirmed – executing pickup continuation")
-              // Delay so any in-flight rgripStateEvent settles before the next step reads rgripState
-              ctx.system.scheduler.scheduleOnce(Duration.ofMillis(10), () => continuation(), ec)
-            }
-          case _ =>
-        }
+      telemetryEventActor
     )
 
     // ── pact ───────────────────────────────────────────────────────────────────
-    subscriber.subscribeCallback(
+    subscriber.subscribeActorRef(
       Set(EventKey(Prefix("wfos.bgrxAssembly.pacthcd"), EventName("PactMovementEvent"))),
-      event =>
-        event match {
-          case sysEvent: SystemEvent =>
-            val pos = sysEvent(PactInfo.currentPositionKey).head
-            pactState = pactState.copy(currentPosition = pos)
-            log.info(s"Assembly [PactMovementEvent]: pact at $pos mm")
-          case _ =>
-        }
-    )
-    subscriber.subscribeCallback(
-      Set(EventKey(Prefix("wfos.bgrxAssembly.pacthcd"), EventName("PactStatusEvent"))),
-      event =>
-        event match {
-          case sysEvent: SystemEvent =>
-            val pos       = sysEvent(PactInfo.currentPositionKey).head
-            val operation = sysEvent(PactInfo.operationKey).head
-            pactState = pactState.copy(currentPosition = pos, operation = operation)
-            log.info(s"Assembly [PactStatusEvent]: pos=$pos mm, op=$operation")
-          case _ =>
-        }
+      telemetryEventActor
     )
 
-    subscriber.subscribeCallback(
-      Set(EventKey(Prefix("wfos.bgrxAssembly.pacthcd"), EventName("pactPushPullEvent"))),
-      event =>
-        event match {
-          case sysEvent: SystemEvent =>
-            val operation = sysEvent(PactInfo.operationKey).head
-            val pos       = sysEvent(PactInfo.currentPositionKey).head
-            pactState = pactState.copy(currentPosition = pos, operation = operation)
+    subscriber
+      .subscribeActorRef(
+        Set(EventKey(Prefix("wfos.bgrxAssembly.pacthcd"), EventName("PactStatusEvent"))),
+        telemetryEventActor
+      )
 
-            operation match {
-              case "push" =>
-                val slotLinearDist = LgmInfo.gratingExchangePosition.head - lgmState.currentPosition
-                val slotIndex      = LgmInfo.gratingLinearDistance.indexWhere(d => math.abs(d - slotLinearDist) <= 0.01)
-                val bgid           = if (slotIndex >= 0) LgmInfo.indexToBgid(slotIndex) else ""
-                if (bgid.nonEmpty) {
-                  log.info(s"Assembly [pactPushPullEvent/push]: bgid=$bgid – publishing gratingTransferEvent(push)")
-                  publishGratingTransferEvent(operation = "push", bgid = bgid)
-                }
-                else {
-                  log.error("Assembly [pactPushPullEvent/push]: could not determine bgid from lgm position")
-                }
-
-              case "pull" =>
-                val bgid = rgripState.gratingId.getOrElse("")
-                if (bgid.nonEmpty) {
-                  log.info(s"Assembly [pactPushPullEvent/pull]: bgid=$bgid – publishing gratingTransferEvent(pull)")
-                  publishGratingTransferEvent(operation = "pull", bgid = bgid)
-                }
-                else {
-                  log.error("Assembly [pactPushPullEvent/pull]: rgripState.gratingId is empty")
-                }
-
-              case other =>
-                log.warn(s"Assembly [pactPushPullEvent]: unknown operation '$other'")
-            }
-          case _ =>
-        }
-    ): Unit
+//    subscriber.subscribeActorRef(
+//      Set(EventKey(Prefix("wfos.bgrxAssembly.pacthcd"), EventName("pactPushPullEvent"))),
+//      telemetryEventActor
+//    )
   }
 
   private def publishGratingTransferEvent(operation: String, bgid: String): Unit = {
@@ -520,8 +668,8 @@ class BgrxassemblyHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswC
   }
 
   private def moveLgripHcdToExchange(runId: Id, originalSetup: Setup): Unit = {
-    if (rgripState.currentAngle != RgripInfo.exchangeAngle.head) {
-      log.warn(s"Pickup Step 2: rgrip not at exchange (${rgripState.currentAngle}°) – re-invoking moveRgripHcd to recover")
+    if (assemblyState.rgripState.currentAngle != RgripInfo.exchangeAngle.head) {
+      log.warn(s"Pickup Step 2: rgrip not at exchange (${assemblyState.rgripState.currentAngle}°) – re-invoking moveRgripHcd to recover")
       moveRgripHcd(runId, originalSetup)
       return
     }
@@ -538,21 +686,23 @@ class BgrxassemblyHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswC
     // rgripHasGrating must be false (rgrip must be empty before picking up a new grating).
     // Recovery: re-invoke the appropriate earlier step, which will chain back here.
     // rgripHasGrating==true is a real state error – no mechanical recovery possible.
-    if (rgripState.currentAngle != RgripInfo.exchangeAngle.head) {
-      log.warn(s"Pickup Step 3: rgrip not at exchange (${rgripState.currentAngle}°) – re-invoking moveRgripHcd to recover")
+    if (assemblyState.rgripState.currentAngle != RgripInfo.exchangeAngle.head) {
+      log.warn(s"Pickup Step 3: rgrip not at exchange (${assemblyState.rgripState.currentAngle}°) – re-invoking moveRgripHcd to recover")
       moveRgripHcd(runId, originalSetup)
       return
     }
-    if (lgripState.currentPosition != LgripInfo.exchangePosition) {
-      log.warn(s"Pickup Step 3: lgrip not at exchange (${lgripState.currentPosition} mm) – re-invoking moveLgripHcdToExchange to recover")
+    if (assemblyState.lgripState.currentPosition != LgripInfo.exchangePosition) {
+      log.warn(
+        s"Pickup Step 3: lgrip not at exchange (${assemblyState.lgripState.currentPosition} mm) – re-invoking moveLgripHcdToExchange to recover"
+      )
       moveLgripHcdToExchange(runId, originalSetup)
       return
     }
-    if (rgripState.hasGrating) {
+    if (assemblyState.rgripState.hasGrating) {
       // rgrip still holds a grating – this means the prior return sequence did not
       // complete successfully. Cannot proceed; abort with an error.
       log.error(
-        s"Pickup Step 3 ABORTED: rgrip still has grating '${rgripState.gratingId.getOrElse("")}' – rgrip must be empty before lgm is aligned for pickup"
+        s"Pickup Step 3 ABORTED: rgrip still has grating '${assemblyState.rgripState.gratingId.getOrElse("")}' – rgrip must be empty before lgm is aligned for pickup"
       )
       commandResponseManager.updateCommand(
         Invalid(
@@ -583,28 +733,30 @@ class BgrxassemblyHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswC
     // Validation: rgripHCD, lgripHCD and lgmHCD must all be at exchange
     // position, and pactHcd must be at OUT (retracted) before starting a push.
     // Recovery: re-invoke the appropriate earlier step, which will chain back here.
-    if (rgripState.currentAngle != RgripInfo.exchangeAngle.head) {
-      log.warn(s"Pickup Step 4a: rgrip not at exchange (${rgripState.currentAngle}°) – re-invoking moveRgripHcd to recover")
+    if (assemblyState.rgripState.currentAngle != RgripInfo.exchangeAngle.head) {
+      log.warn(s"Pickup Step 4a: rgrip not at exchange (${assemblyState.rgripState.currentAngle}°) – re-invoking moveRgripHcd to recover")
       moveRgripHcd(runId, originalSetup)
       return
     }
-    if (lgripState.currentPosition != LgripInfo.exchangePosition) {
-      log.warn(s"Pickup Step 4a: lgrip not at exchange (${lgripState.currentPosition} mm) – re-invoking moveLgripHcdToExchange to recover")
+    if (assemblyState.lgripState.currentPosition != LgripInfo.exchangePosition) {
+      log.warn(
+        s"Pickup Step 4a: lgrip not at exchange (${assemblyState.lgripState.currentPosition} mm) – re-invoking moveLgripHcdToExchange to recover"
+      )
       moveLgripHcdToExchange(runId, originalSetup)
       return
     }
     val bgid              = originalSetup(RgripInfo.gratingModeKey).head
     val slotIndex         = LgmInfo.bgidToIndex(bgid)
     val targetMagazinePos = LgmInfo.gratingExchangePosition.head - LgmInfo.gratingLinearDistance(slotIndex)
-    if (lgmState.currentPosition != targetMagazinePos) {
+    if (assemblyState.lgmState.currentPosition != targetMagazinePos) {
       log.warn(
-        s"Pickup Step 4a: lgm not at exchange,Current Position (${lgmState.currentPosition} mm) – re-invoking returnMoveLgmHcd to recover"
+        s"Pickup Step 4a: lgm not at exchange,Current Position (${assemblyState.lgmState.currentPosition} mm) – re-invoking returnMoveLgmHcd to recover"
       )
       moveLgmHcd(runId, originalSetup)
       return
     }
-    if (pactState.currentPosition != PactInfo.outPosition.head) {
-      log.warn(s"Pickup Step 4a: pact not at OUT (${pactState.currentPosition} mm) – moving pact to OUT before retrying push")
+    if (assemblyState.pactState.currentPosition != PactInfo.outPosition.head) {
+      log.warn(s"Pickup Step 4a: pact not at OUT (${assemblyState.pactState.currentPosition} mm) – moving pact to OUT before retrying push")
       val recoverCmd = Setup(sourcePrefix, CommandName("move"), Some(obsId))
         .madd(PactInfo.targetPositionKey.set(PactInfo.outPosition.head), PactInfo.operationKey.set("push"))
       resolveAndSubmit("pacthcd", recoverCmd, runId) { case _: Completed =>
@@ -641,7 +793,7 @@ class BgrxassemblyHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswC
     // pushed into rgrip) and rgripGratingId must match the requested target bgid,
     // confirming rgrip is holding the correct grating before lgrip retracts.
     val targetBgid = originalSetup(RgripInfo.gratingModeKey).head
-    if (!rgripState.hasGrating) {
+    if (!assemblyState.rgripState.hasGrating) {
       log.error("Pickup Step 5 ABORTED: rgripHasGrating is false – grating was not successfully pushed into rgrip")
       commandResponseManager.updateCommand(
         Invalid(
@@ -651,7 +803,7 @@ class BgrxassemblyHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswC
       )
       return
     }
-    rgripState.gratingId match {
+    assemblyState.rgripState.gratingId match {
       case Some(gratingId) if gratingId != targetBgid =>
         log.error(s"Pickup Step 5 ABORTED: rgrip holds '$gratingId' but expected '$targetBgid' – wrong grating engaged")
         commandResponseManager.updateCommand(
@@ -687,8 +839,10 @@ class BgrxassemblyHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswC
     // Validation: lgripHCD must be at home position (0 mm) before
     // rgrip is allowed to rotate to the observation target angle.
     // Recovery: re-invoke moveLgripHcdToHome, which will chain back here.
-    if (lgripState.currentPosition != LgripInfo.homePosition) {
-      log.warn(s"Pickup Step 6: lgrip not at home (${lgripState.currentPosition} mm) – re-invoking moveLgripHcdToHome to recover")
+    if (assemblyState.lgripState.currentPosition != LgripInfo.homePosition) {
+      log.warn(
+        s"Pickup Step 6: lgrip not at home (${assemblyState.lgripState.currentPosition} mm) – re-invoking moveLgripHcdToHome to recover"
+      )
       moveLgripHcdToHome(runId, originalSetup)
       return
     }
@@ -714,7 +868,7 @@ class BgrxassemblyHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswC
     log.info(s"Bgrx Assembly : Starting Grating Return Sequence – runId=$runId")
     logAllHcdStates("RETURN-BEFORE")
     // Capture bgid NOW before gratingTransferEvent can clear rgripState.gratingId
-    val bgidOpt = rgripState.gratingId
+    val bgidOpt = assemblyState.rgripState.gratingId
     if (bgidOpt.isEmpty) {
       log.error("Return sequence ABORTED: rgripState.gratingId is empty at sequence start")
       commandResponseManager.updateCommand(Invalid(runId, UnsupportedCommandIssue("rgrip is not holding a grating")))
@@ -734,8 +888,10 @@ class BgrxassemblyHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswC
   }
 
   private def returnMoveLgripHcd(runId: Id, bgid: String): Unit = {
-    if (rgripState.currentAngle != RgripInfo.exchangeAngle.head) {
-      log.warn(s"Return Step 2: rgrip not at exchange (${rgripState.currentAngle}°) – re-invoking returnMoveRgripHcd to recover")
+    if (assemblyState.rgripState.currentAngle != RgripInfo.exchangeAngle.head) {
+      log.warn(
+        s"Return Step 2: rgrip not at exchange (${assemblyState.rgripState.currentAngle}°) – re-invoking returnMoveRgripHcd to recover"
+      )
       returnMoveRgripHcd(runId, bgid)
       return
     }
@@ -753,17 +909,21 @@ class BgrxassemblyHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswC
     // rgrip is holding (magazine must have the correct empty slot ready).
     // Recovery: re-invoke the appropriate earlier step to fix positioning,
     // which will chain back here once the HCD reaches exchange position.
-    if (rgripState.currentAngle != RgripInfo.exchangeAngle.head) {
-      log.warn(s"Return Step 3: rgrip not at exchange (${rgripState.currentAngle}°) – re-invoking returnMoveRgripHcd to recover")
+    if (assemblyState.rgripState.currentAngle != RgripInfo.exchangeAngle.head) {
+      log.warn(
+        s"Return Step 3: rgrip not at exchange (${assemblyState.rgripState.currentAngle}°) – re-invoking returnMoveRgripHcd to recover"
+      )
       returnMoveRgripHcd(runId, bgid)
       return
     }
-    if (lgripState.currentPosition != LgripInfo.exchangePosition) {
-      log.warn(s"Return Step 3: lgrip not at exchange (${lgripState.currentPosition} mm) – re-invoking returnMoveLgripHcd to recover")
+    if (assemblyState.lgripState.currentPosition != LgripInfo.exchangePosition) {
+      log.warn(
+        s"Return Step 3: lgrip not at exchange (${assemblyState.lgripState.currentPosition} mm) – re-invoking returnMoveLgripHcd to recover"
+      )
       returnMoveLgripHcd(runId, bgid)
       return
     }
-    lgmState.emptySlotBgid match {
+    assemblyState.lgmState.emptySlotBgid match {
       case Some(emptyBgid) if emptyBgid != bgid =>
         // This is a real data/state error – no mechanical recovery possible here.
         log.error(
@@ -781,8 +941,8 @@ class BgrxassemblyHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswC
       case _ => // emptySlotBgid == bgid → correct slot, proceed
     }
 
-    if (pactState.currentPosition != PactInfo.outPosition.head) {
-      log.warn(s"Return Step 3: pact not at OUT (${pactState.currentPosition} mm) – moving pact to OUT before retrying pull")
+    if (assemblyState.pactState.currentPosition != PactInfo.outPosition.head) {
+      log.warn(s"Return Step 3: pact not at OUT (${assemblyState.pactState.currentPosition} mm) – moving pact to OUT before retrying pull")
       val recoverCmd = Setup(sourcePrefix, CommandName("move"), Some(obsId))
         .madd(PactInfo.targetPositionKey.set(PactInfo.outPosition.head), PactInfo.operationKey.set("pull"))
       resolveAndSubmit("pacthcd", recoverCmd, runId) { case _: Completed =>
@@ -810,29 +970,33 @@ class BgrxassemblyHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswC
     // Also pactHcd must be at OUT (retracted) position before starting a pull.
     // Recovery: re-invoke the appropriate earlier step, which will chain back here.
     // Note: bgid is re-read from rgripState since it was captured at sequence start.
-    val bgid = rgripState.gratingId.getOrElse("")
-    if (rgripState.currentAngle != RgripInfo.exchangeAngle.head) {
-      log.warn(s"Return Step 4a: rgrip not at exchange (${rgripState.currentAngle}°) – re-invoking returnMoveRgripHcd to recover")
+    val bgid = assemblyState.rgripState.gratingId.getOrElse("")
+    if (assemblyState.rgripState.currentAngle != RgripInfo.exchangeAngle.head) {
+      log.warn(
+        s"Return Step 4a: rgrip not at exchange (${assemblyState.rgripState.currentAngle}°) – re-invoking returnMoveRgripHcd to recover"
+      )
       returnMoveRgripHcd(runId, bgid)
       return
     }
-    if (lgripState.currentPosition != LgripInfo.exchangePosition) {
-      log.warn(s"Return Step 4a: lgrip not at exchange (${lgripState.currentPosition} mm) – re-invoking returnMoveLgripHcd to recover")
+    if (assemblyState.lgripState.currentPosition != LgripInfo.exchangePosition) {
+      log.warn(
+        s"Return Step 4a: lgrip not at exchange (${assemblyState.lgripState.currentPosition} mm) – re-invoking returnMoveLgripHcd to recover"
+      )
       returnMoveLgripHcd(runId, bgid)
       return
     }
 
     val slotIndex         = LgmInfo.bgidToIndex(bgid)
     val targetMagazinePos = LgmInfo.gratingExchangePosition.head - LgmInfo.gratingLinearDistance(slotIndex)
-    if (lgmState.currentPosition != targetMagazinePos) {
+    if (assemblyState.lgmState.currentPosition != targetMagazinePos) {
       log.warn(
-        s"Return Step 4a: lgm not at exchange,Current Position (${lgmState.currentPosition} mm) – re-invoking returnMoveLgmHcd to recover"
+        s"Return Step 4a: lgm not at exchange,Current Position (${assemblyState.lgmState.currentPosition} mm) – re-invoking returnMoveLgmHcd to recover"
       )
       returnMoveLgmHcd(runId, bgid)
       return
     }
-    if (pactState.currentPosition != PactInfo.outPosition.head) {
-      log.warn(s"Return Step 4a: pact not at OUT (${pactState.currentPosition} mm) – moving pact to OUT before retrying pull")
+    if (assemblyState.pactState.currentPosition != PactInfo.outPosition.head) {
+      log.warn(s"Return Step 4a: pact not at OUT (${assemblyState.pactState.currentPosition} mm) – moving pact to OUT before retrying pull")
       val recoverCmd = Setup(sourcePrefix, CommandName("move"), Some(obsId))
         .madd(PactInfo.targetPositionKey.set(PactInfo.outPosition.head), PactInfo.operationKey.set("pull"))
       resolveAndSubmit("pacthcd", recoverCmd, runId) { case _: Completed =>
@@ -877,19 +1041,19 @@ class BgrxassemblyHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswC
   private def logAllHcdStates(label: String): Unit = {
     log.info(s"════ HCD STATE SNAPSHOT [$label] ════")
     log.info(
-      s"  rgripHcd : angle=${rgripState.currentAngle}°, " +
-        s"hasGrating=${rgripState.hasGrating}, gratingId='${rgripState.gratingId.getOrElse("")}', " +
-        s"op=${rgripState.operation}"
+      s"  rgripHcd : angle=${assemblyState.rgripState.currentAngle}°, " +
+        s"hasGrating=${assemblyState.rgripState.hasGrating}, gratingId='${assemblyState.rgripState.gratingId.getOrElse("")}', " +
+        s"op=${assemblyState.rgripState.operation}"
     )
     log.info(
-      s"  lgripHcd : position=${lgripState.currentPosition} mm, op=${lgripState.operation}"
+      s"  lgripHcd : position=${assemblyState.lgripState.currentPosition} mm, op=${assemblyState.lgripState.operation}"
     )
     log.info(
-      s"  lgmHcd   : position=${lgmState.currentPosition} mm, op=${lgmState.operation}, " +
-        s"emptySlot=${lgmState.emptySlot}, emptySlotBgid='${lgmState.emptySlotBgid.getOrElse("")}'"
+      s"  lgmHcd   : position=${assemblyState.lgmState.currentPosition} mm, op=${assemblyState.lgmState.operation}, " +
+        s"emptySlot=${assemblyState.lgmState.emptySlot}, emptySlotBgid='${assemblyState.lgmState.emptySlotBgid.getOrElse("")}'"
     )
     log.info(
-      s"  pactHcd  : position=${pactState.currentPosition} mm, op=${pactState.operation}"
+      s"  pactHcd  : position=${assemblyState.pactState.currentPosition} mm, op=${assemblyState.pactState.operation}"
     )
     log.info(s"════════════════════════════════════════════")
   }
@@ -921,6 +1085,39 @@ class BgrxassemblyHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswC
       case Failure(exception) =>
         log.error(s"Bgrx Assembly [$hcdName] : Command Future failed – ${exception.getMessage}")
         commandResponseManager.updateCommand(Invalid(runId, UnsupportedCommandIssue(s"Communication failure: ${exception.getMessage}")))
+    }
+  }
+
+  // Telementry helper methods
+  private def completeReturnTransfer(): Unit = {
+    onReturnTransferComplete.foreach { continuation =>
+      onReturnTransferComplete = None
+
+      log.info(
+        "Assembly: gratingTransfer(pull) confirmed – executing return continuation"
+      )
+
+      ctx.system.scheduler.scheduleOnce(
+        Duration.ofMillis(10),
+        () => continuation(),
+        ec
+      )
+    }
+  }
+
+  private def completePickupTransfer(): Unit = {
+    onPickupTransferComplete.foreach { continuation =>
+      onPickupTransferComplete = None
+
+      log.info(
+        "Assembly: gratingTransfer(push) confirmed – executing pickup continuation"
+      )
+
+      ctx.system.scheduler.scheduleOnce(
+        Duration.ofMillis(10),
+        () => continuation(),
+        ec
+      )
     }
   }
 
