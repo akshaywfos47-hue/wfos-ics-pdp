@@ -16,7 +16,9 @@ object Dependencies {
     "org.apache.pekko" %% "pekko-stream" % "1.1.3",
     "org.apache.pekko" %% "pekko-http" % "1.1.0",
     "org.apache.pekko" %% "pekko-http-spray-json" % "1.1.0",
-    "org.apache.pekko" %% "pekko-http-cors" % "1.1.0"
+    "org.apache.pekko" %% "pekko-http-cors" % "1.1.0",
+    "org.apache.poi" % "poi" % "5.2.5",
+    "org.apache.poi" % "poi-ooxml" % "5.2.5"
 
 
   )

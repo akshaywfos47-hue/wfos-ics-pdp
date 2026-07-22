@@ -14,7 +14,8 @@ class TelemetryManager(
     loggerFactory: LoggerFactory,
     assemblyState: AssemblyState,
     isSequenceRunning: () => Boolean,
-    getCurrentStep: () => Step,
+    isCurrentStepValid: () => Boolean,
+    getCurrentStep: () => Option[Step],
     publishGratingTransferEvent: (String, String) => Unit,
     completeReturnTransfer: () => Unit,
     completePickupTransfer: () => Unit
@@ -26,6 +27,10 @@ class TelemetryManager(
   private val log = loggerFactory.getLogger
 
   private def isEventAllowed(currentStep: Step, event: SystemEvent): Boolean = {
+
+    if (!isSequenceRunning()) {
+      return false
+    }
 
     val source = event.source.toString.toLowerCase
 
@@ -56,9 +61,15 @@ class TelemetryManager(
       return
     }
 
+    if (!isCurrentStepValid())
+      return
+
     event match {
       case sysEvent: SystemEvent =>
-        val currentStep = getCurrentStep()
+        val currentStep = getCurrentStep() match {
+          case Some(step) => step
+          case None       => return
+        }
 
         if (!isEventAllowed(currentStep, sysEvent)) {
           log.debug(s"Ignoring event ${sysEvent.eventName} from ${sysEvent.source} for step $currentStep")
@@ -132,6 +143,10 @@ class TelemetryManager(
         val hasGrating = sysEvent(RgripInfo.hasGratingKey).head
         val gratingId  = sysEvent(RgripInfo.gratingIdKey).head
         val operation  = sysEvent(RgripInfo.operationKey).head
+
+        log.info(
+          s"[StateEvent] received angle=$angle, oldAngle=${assemblyState.rgripState.currentAngle}"
+        )
         assemblyState.rgripState = RgripState(
           currentAngle = angle,
           hasGrating = hasGrating,

@@ -9,6 +9,9 @@ class BgrxApiService(
   def home(): Unit = {
     assembly.executeSequence(SequenceType.HOME)
   }
+  def returns(): Unit = {
+    assembly.executeSequence(SequenceType.RETURN)
+  }
 
   def park(): Unit = {
     assembly.executeSequence(SequenceType.PARK)

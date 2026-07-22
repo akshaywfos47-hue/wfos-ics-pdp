@@ -6,8 +6,28 @@ import csw.prefix.models.Prefix
 import csw.params.core.models.ObsId
 import csw.params.commands.{CommandName, Setup}
 import wfos.bgrxassembly.AssemblyState
+import wfos.lgriphcd.{LgripInfo}
+import wfos.rgriphcd.{RgripInfo}
+import wfos.lgmhcd.{LgmInfo}
+import wfos.pacthcd.{PactInfo}
+import wfos.bgrxassembly.configuration.rgrip.RGripLookupService
 
 object BgrxCommandBuilder {
+
+  private def rGripAssemblyCoordinate(targetAngle: Int): Int =
+    RGripLookupService
+      .assemblyCoordinate(targetAngle)
+      .getOrElse(
+        throw new IllegalArgumentException(
+          s"No lookup entry found for target angle: $targetAngle"
+        )
+      )
+
+  private def targetMagazinePosition(bgid: String): Double = {
+    val slotIndex = LgmInfo.bgidToIndex(bgid)
+    LgmInfo.gratingExchangePosition.head -
+    LgmInfo.gratingLinearDistance(slotIndex)
+  }
 
   def buildCommand(
       sequence: SequenceType,
@@ -60,8 +80,11 @@ object BgrxCommandBuilder {
         step match {
 
           case Step.RGRIP =>
-            // TODO
-            command
+            val updatedCommand = command.madd(
+              RgripInfo.targetAngleKey
+                .set(RgripInfo.exchangeAngle.head)
+            )
+            updatedCommand
 
           case Step.LGRIP =>
             // TODO
@@ -84,20 +107,25 @@ object BgrxCommandBuilder {
         step match {
 
           case Step.RGRIP =>
-            // TODO
-            command
+            val updatedCommand = command.madd(
+              RgripInfo.targetAngleKey
+                .set(rGripAssemblyCoordinate(RgripInfo.exchangeAngle.head))
+            )
+            updatedCommand
 
           case Step.LGRIP =>
             // TODO
-            command
+            val updatedCommand = command.madd(LgripInfo.targetPositionKey.set(LgripInfo.exchangePosition))
+            updatedCommand
 
           case Step.LGM =>
             // TODO
-            command
+            val bgid = assemblyState.rgripState.gratingId.get
+            command.madd(LgmInfo.targetGratingPositionKey.set(targetMagazinePosition(bgid)))
 
           case Step.PACT =>
             // TODO
-            command
+            command.madd(PactInfo.targetPositionKey.set(PactInfo.outPosition.head), PactInfo.operationKey.set("pull"))
         }
 
       // =====================================================

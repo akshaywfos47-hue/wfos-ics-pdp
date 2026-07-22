@@ -26,6 +26,7 @@ import csw.command.api.scaladsl.CommandService
 import csw.command.client.CommandServiceFactory
 import csw.prefix.models.{Prefix, Subsystem}
 import csw.params.core.generics.Parameter
+import java.nio.file.Paths
 
 import scala.concurrent.{ExecutionContextExecutor, Future}
 import wfos.lgriphcd.{LgripInfo, LgripState}
@@ -36,6 +37,7 @@ import wfos.bgrxassembly.components.{RgripHcd, LgripHcd, Lgmhcd}
 import csw.params.events.{EventKey, EventName, Event, SystemEvent}
 import wfos.bgrxassembly.TelemetryManager
 import wfos.bgrxassembly.AlarmManager
+import wfos.bgrxassembly.configuration.rgrip.RGripLookupService
 import wfos.bgrxassembly.BgrxValidator
 import org.apache.pekko.util.Timeout
 import scala.concurrent.duration._
@@ -100,11 +102,13 @@ class BgrxassemblyHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswC
 
   // manager class
   private val assemblyState = new AssemblyState()
+
   private val telemetryManager =
     new TelemetryManager(
       loggerFactory,
       assemblyState,
       () => isSequenceRunning,
+      () => isCurrentStepValid,
       () => currentStep,
       publishGratingTransferEvent,
       completeReturnTransfer,
@@ -131,13 +135,35 @@ class BgrxassemblyHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswC
   // =====================================================
   private var sequenceRunning: Boolean              = false
   private var currentSequence: Option[SequenceType] = None
-  private var currentStepIndex: Int                 = 0
+  private var currentStepIndex: Int                 = -1
+
+  private def isCurrentStepValid: Boolean = {
+    if (currentSequence.isEmpty)
+      return false
+
+    val sequence = getSequence(currentSequence.get)
+
+    currentStepIndex >= 0 && currentStepIndex < sequence.length
+  }
 
   def isSequenceRunning: Boolean =
     sequenceRunning
 
-  private def currentStep: Step =
-    getSequence(currentSequence.get)(currentStepIndex)
+//  private def currentStep: Step =
+//    getSequence(currentSequence.get)(currentStepIndex)
+
+  private def currentStep: Option[Step] = {
+
+    if (currentSequence.isEmpty)
+      return None
+
+    val sequence = getSequence(currentSequence.get)
+
+    if (currentStepIndex < 0 || currentStepIndex >= sequence.length)
+      return None
+
+    Some(sequence(currentStepIndex))
+  }
   // =====================================================
   // 3. Sequence Definitions
   // =====================================================
@@ -171,11 +197,11 @@ class BgrxassemblyHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswC
     val sequence = getSequence(currentSequence.get)
 
     // Check whether the sequence has completed
-    if (currentStepIndex >= sequence.length) {
+    if (currentStepIndex < 0 || currentStepIndex >= sequence.length) {
       log.info(s"$currentSequence sequence completed")
       sequenceRunning = false
       currentSequence = None
-      currentStepIndex = 0
+      currentStepIndex = -1
       return
     }
 
@@ -331,6 +357,7 @@ class BgrxassemblyHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswC
   private def initializeClass(): Unit = {
     telemetryManager()
     alarmManger()
+
     // Create API objects
     apiService = new BgrxApiService(this)
     routes = new BgrxRoutes(apiService)
@@ -340,10 +367,49 @@ class BgrxassemblyHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswC
 
     httpServer.start()
   }
+
+  // initializes llokup tables from configuration service
+  private def initializeLookupTables(): Unit = {
+
+    RGripLookupService.initialize(
+      ctx.system,
+      locationService,
+      Paths.get("/wfos/rgriphcd/RGRIP_Lookup_Table_Angles.xlsx")
+    )
+
+    // Future lookup tables
+    // LGripLookupService.initialize(
+    //   ctx.system,
+    //   locationService,
+    //   Paths.get("/wfos/lgriphcd/LGRIP_Lookup_Table_Angles.xlsx")
+    // )
+
+    // PactLookupService.initialize(
+    //   ctx.system,
+    //   locationService,
+    //   Paths.get("/wfos/pacthcd/PACT_Lookup_Table.xlsx")
+    // )
+  }
+  private def logLookupEntries(): Unit = {
+
+    log.info("RGrip Lookup Table:")
+
+    RGripLookupService.entries.foreach { entry =>
+      log.info(
+        s"Rotation Angle = ${entry.rotationAngle}, " +
+          s"Assembly Coordinate = ${entry.assemblyCoordinate}, " +
+          s"HCD Coordinate = ${entry.hcdCoordinate}"
+      )
+    }
+  }
+
   // ── Lifecycle ───────────────────────────────────────────────────────────────
   override def initialize(): Unit = {
     log.info("Initializing BgrxAssembly with  ")
+    initializeLookupTables()
     initializeClass()
+    logLookupEntries()
+
     log.info(s"Assembly sourcePrefix = $sourcePrefix")
 
     // Register alarm keys in the CSW Alarm Store before any HCD command runs.
@@ -1070,6 +1136,9 @@ class BgrxassemblyHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswC
 
     cs.submit(command).onComplete {
       case Success(response) =>
+        log.info(
+          s"[Completed] response=$response currentAngle=${assemblyState.rgripState.currentAngle}"
+        )
         if (onResponse.isDefinedAt(response)) {
           onResponse(response)
         }

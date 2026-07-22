@@ -22,6 +22,12 @@ class BgrxRoutes(service: BgrxApiService) {
               complete("HOME command accepted")
             }
           },
+          path("return") {
+            post {
+              service.returns()
+              complete("RETURN command accepted")
+            }
+          },
           path("park") {
             post {
               service.park()
