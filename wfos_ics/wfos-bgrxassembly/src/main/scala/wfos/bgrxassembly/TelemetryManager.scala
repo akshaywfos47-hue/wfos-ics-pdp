@@ -9,64 +9,91 @@ import wfos.lgriphcd.{LgripInfo, LgripState}
 import wfos.rgriphcd.{RgripInfo, RgripState}
 import wfos.lgmhcd.{LgmInfo, LgmState}
 import wfos.pacthcd.{PactInfo, PactState}
+import wfos.bgrxassembly.models.{BarrierMode, SequenceState}
 
 class TelemetryManager(
     loggerFactory: LoggerFactory,
     assemblyState: AssemblyState,
-    isSequenceRunning: () => Boolean,
-    isCurrentStepValid: () => Boolean,
-    getCurrentStep: () => Option[Step],
+//    isSequenceRunning: () => Boolean,
+//    isCurrentStepValid: () => Boolean,
+//    getCurrentStep: () => Option[Step],
+    sequenceState: SequenceState,
     publishGratingTransferEvent: (String, String) => Unit,
     completeReturnTransfer: () => Unit,
-    completePickupTransfer: () => Unit
+    completePickupTransfer: () => Unit,
+    stateUpdateCompleted: Step => Unit
 ) {
   def apply(): Unit = {
     println("telementry manager 555")
   }
 
+  // logger factory context by assembly
   private val log = loggerFactory.getLogger
 
-  private def isEventAllowed(currentStep: Step, event: SystemEvent): Boolean = {
+//sequence context initialization
+  // val sequenceContext = getSequenceContext()
 
-    if (!isSequenceRunning()) {
+  private def isEventAllowed(currentStep: Step, event: SystemEvent): Boolean = {
+    if (!sequenceState.context.isSequenceRunning) {
       return false
     }
 
     val source = event.source.toString.toLowerCase
 
-    currentStep match {
+    sequenceState.context.barrierMode match {
+      case BarrierMode.Recovery =>
+        sequenceState.context.expectedTelemetryStep.exists {
+          case Step.RGRIP => source.contains("rgriphcd")
+          case Step.LGRIP => source.contains("lgriphcd")
+          case Step.LGM   => source.contains("lgmhcd")
+          case Step.PACT  => source.contains("pacthcd")
+          case _          => false
+        }
 
-      case Step.PACT =>
-        (source.contains("pacthcd")) ||
-        (source.contains("lgmhcd") && event.eventName == EventName("LgmStatusEvent")) ||
-        (source.contains("rgriphcd") && event.eventName == EventName("rgripStateEvent"))
+      case BarrierMode.Normal =>
+        currentStep match {
+          case Step.PACT =>
+            source.contains("pacthcd") ||
+            (source.contains("lgmhcd") && event.eventName == EventName("LgmStatusEvent")) ||
+            (source.contains("rgriphcd") && event.eventName == EventName("rgripStateEvent"))
+          case Step.LGM   => source.contains("lgmhcd")
+          case Step.LGRIP => source.contains("lgriphcd")
+          case Step.RGRIP => source.contains("rgriphcd")
+          case _          => false
+        }
+      case BarrierMode.NotSet => false
+    }
+  }
 
-      case Step.LGM =>
-        source.contains("lgmhcd")
+  private def markTelemetryCompleted(step: Step): Unit = {
+    val isPactTransferStep =
+      sequenceState.context.currentStep.contains(Step.PACT) &&
+        (sequenceState.context.currentSequence.contains(SequenceType.RETURN) ||
+          sequenceState.context.currentSequence.contains(SequenceType.PICKUP))
 
-      case Step.LGRIP =>
-        source.contains("lgriphcd")
-
-      case Step.RGRIP =>
-        source.contains("rgriphcd")
-
-      case _ =>
-        false
+    if (
+      isPactTransferStep &&
+      sequenceState.context.requiredTelemetrySteps.contains(step)
+    ) {
+      sequenceState.context = sequenceState.context.copy(
+        completedTelemetrySteps = sequenceState.context.completedTelemetrySteps + step
+      )
     }
   }
 
   def eventServiceHelper(event: Event): Unit = {
     // log.info(s"TelemetryManager received event now : ${event.eventName}")
-    if (!isSequenceRunning()) {
+    if (!sequenceState.context.isSequenceRunning) {
       return
     }
 
-    if (!isCurrentStepValid())
+    if (!sequenceState.context.isCurrentStepValid) {
       return
+    }
 
     event match {
       case sysEvent: SystemEvent =>
-        val currentStep = getCurrentStep() match {
+        val currentStep = sequenceState.context.currentStep match {
           case Some(step) => step
           case None       => return
         }
@@ -154,6 +181,9 @@ class TelemetryManager(
           operation = operation
         )
         log.info(s" Telementry Assembly [rgripStateEvent]: angle=$angle°, hasGrating=$hasGrating, gratingId=$gratingId")
+        markTelemetryCompleted(Step.RGRIP)
+        stateUpdateCompleted(Step.RGRIP)
+
       case _ =>
     }
   }
@@ -188,6 +218,7 @@ class TelemetryManager(
         val operation = sysEvent(LgripInfo.operationKey).head
         assemblyState.lgripState = LgripState(currentPosition = pos, operation = operation)
         log.info(s" Telementry Assembly [lgripStateEvent]: pos=$pos mm, op=$operation")
+        stateUpdateCompleted(Step.LGRIP)
       case _ =>
     }
   }
@@ -219,7 +250,9 @@ class TelemetryManager(
           emptySlotIndex = if (emptySlot && emptySlotIndex >= 0) Some(emptySlotIndex) else None,
           emptySlotBgid = if (emptySlot && emptySlotBgid.nonEmpty) Some(emptySlotBgid) else None
         )
-        log.info(s" Telementry Assembly [LgmStatusEvent]: pos=$pos mm, emptySlot=$emptySlot, emptySlotBgid=$emptySlotBgid")
+        log.info(
+          s" Telementry Assembly [LgmStatusEvent]: pos=$pos mm, emptySlot=$emptySlot, emptySlotBgid=$emptySlotBgid"
+        )
 
         // LgmStatusEvent is the last event in the gratingTransferEvent chain
         // (lgmHcd publishes it after updating its gratingMap). At this point
@@ -243,6 +276,9 @@ class TelemetryManager(
 //        }
         // this code also moved to assembly instead we are calling below function
         completePickupTransfer()
+        markTelemetryCompleted(Step.LGM)
+        stateUpdateCompleted(Step.LGM)
+
       case _ =>
     }
   }
@@ -264,6 +300,9 @@ class TelemetryManager(
         val operation = sysEvent(PactInfo.operationKey).head
         assemblyState.pactState = assemblyState.pactState.copy(currentPosition = pos, operation = operation)
         log.info(s" Telementry Assembly [PactStatusEvent]: pos=$pos mm, op=$operation")
+        markTelemetryCompleted(Step.PACT)
+        stateUpdateCompleted(Step.PACT)
+
       case _ =>
     }
 

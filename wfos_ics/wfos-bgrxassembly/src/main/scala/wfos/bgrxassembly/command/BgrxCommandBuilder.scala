@@ -1,4 +1,4 @@
-package wfos.bgrxassembly
+package wfos.bgrxassembly.command
 
 import wfos.bgrxassembly.SequenceType
 import wfos.bgrxassembly.Step
@@ -14,6 +14,7 @@ import wfos.bgrxassembly.configuration.rgrip.RGripLookupService
 
 object BgrxCommandBuilder {
 
+  // gets assembly values from look up table
   private def rGripAssemblyCoordinate(targetAngle: Int): Int =
     RGripLookupService
       .assemblyCoordinate(targetAngle)
@@ -22,12 +23,6 @@ object BgrxCommandBuilder {
           s"No lookup entry found for target angle: $targetAngle"
         )
       )
-
-  private def targetMagazinePosition(bgid: String): Double = {
-    val slotIndex = LgmInfo.bgidToIndex(bgid)
-    LgmInfo.gratingExchangePosition.head -
-    LgmInfo.gratingLinearDistance(slotIndex)
-  }
 
   def buildCommand(
       sequence: SequenceType,
@@ -121,7 +116,7 @@ object BgrxCommandBuilder {
           case Step.LGM =>
             // TODO
             val bgid = assemblyState.rgripState.gratingId.get
-            command.madd(LgmInfo.targetGratingPositionKey.set(targetMagazinePosition(bgid)))
+            command.madd(LgmInfo.targetGratingPositionKey.set(LgmInfo.targetMagazinePosition(bgid)))
 
           case Step.PACT =>
             // TODO

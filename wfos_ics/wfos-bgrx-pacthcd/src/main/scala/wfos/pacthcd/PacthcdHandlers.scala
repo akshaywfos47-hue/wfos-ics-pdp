@@ -130,10 +130,33 @@ class PacthcdHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswContex
       case setup: Setup =>
         setup.commandName match {
           case CommandName("move")   => onMove(runId, setup)
-          case CommandName("homing") => onHoming(runId)
+          case CommandName("homing") => onHoming(runId, setup)
           case _                     => Invalid(runId, UnsupportedCommandIssue("PactHcd : Invalid command type"))
         }
       case _ => Invalid(runId, UnsupportedCommandIssue("PactHcd : Invalid command type"))
+    }
+  }
+
+  private def isAlreadyAtTarget(setup: Setup, targetPos: Double): Boolean = {
+    val command = setup.commandName.name
+
+    val operation =
+      setup
+        .get(PactInfo.operationKey)
+        .map(_.head)
+        .getOrElse("idle")
+
+    // Update operation first
+    state = state.copy(operation = operation)
+
+    if (math.abs(state.currentPosition - targetPos) <= EPSILON) {
+      log.info(s"  PactHcd [$command]: Already at target position ($targetPos mm)")
+      log.info(s"pact publishes pact status event ")
+      publishStatusEvent(command, "Completed")
+      true
+    }
+    else {
+      false
     }
   }
 
@@ -146,72 +169,123 @@ class PacthcdHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswContex
    * operation is set to "idle" since this is not a push/pull transfer —
    * pactPushPullEvent must NOT fire during homing.
    */
-  private def onHoming(runId: Id): SubmitResponse = {
-    val homePos = PactInfo.homePosition.head
-    log.info(s"PactHcd [homing]: moving directly to homePosition=$homePos mm (OUT)")
+//  private def onHoming(runId: Id): SubmitResponse = {
+//    val homePos = PactInfo.homePosition.head
+//    log.info(s"PactHcd [homing]: moving directly to homePosition=$homePos mm (OUT)")
+//
+//    if (math.abs(state.currentPosition - homePos) <= EPSILON) {
+//      log.info(s"PactHcd [homing]: already at home position ($homePos mm) – completing immediately")
+//      publishStatusEvent("homing", "Completed")
+//      log.info(s"pact publishes pact status event ")
+//      return Completed(runId)
+//    }
+//
+//    state = state.copy(operation = "idle")
+//    moveActuatorTo(homePos)
+//    state = state.copy(currentPosition = homePos, operation = "idle")
+//    PactInfo.currentPosition = PactInfo.currentPositionKey.set(state.currentPosition)
+//
+//    // pactPushPullEvent must NOT fire during homing (operation is "idle")
+//    publishStatusEvent("homing", "Completed")
+//    log.info(s"pact publishes pact status event out side if block")
+//    Completed(runId)
+//  }
 
-    if (math.abs(state.currentPosition - homePos) <= EPSILON) {
-      log.info(s"PactHcd [homing]: already at home position ($homePos mm) – completing immediately")
-      publishStatusEvent("homing", "Completed")
-      log.info(s"pact publishes pact status event ")
+  private def onHoming(runId: Id, setup: Setup): SubmitResponse = {
+    val homePos = PactInfo.homePosition.head
+
+    if (isAlreadyAtTarget(setup, homePos)) {
       return Completed(runId)
     }
-
-    state = state.copy(operation = "idle")
     moveActuatorTo(homePos)
-    state = state.copy(currentPosition = homePos, operation = "idle")
-    PactInfo.currentPosition = PactInfo.currentPositionKey.set(state.currentPosition)
-
-    // pactPushPullEvent must NOT fire during homing (operation is "idle")
     publishStatusEvent("homing", "Completed")
-    log.info(s"pact publishes pact status event out side if block")
     Completed(runId)
   }
-
   // ── Move handler ────────────────────────────────────────────────────────────
+
+//  private def onMove(runId: Id, setup: Setup): SubmitResponse = {
+//    val targetPos = setup(PactInfo.targetPositionKey).head
+//    val fromPos   = state.currentPosition
+//
+//    val operation = setup.get(PactInfo.operationKey).map(_.head).getOrElse("idle")
+//
+//    log.info(s"PactHcd : Moving $fromPos mm → $targetPos mm")
+//
+//    if (math.abs(fromPos - targetPos) <= EPSILON) {
+//      log.info(s"PactHcd : Already at target $targetPos mm")
+//      publishStatusEvent(positionLabel(targetPos), "Completed")
+//      return Completed(runId)
+//    }
+//
+//    state = state.copy(operation = operation)
+//
+//    // Execute motion
+//    moveActuatorTo(targetPos)
+//    state = state.copy(currentPosition = targetPos)
+//    PactInfo.currentPosition = PactInfo.currentPositionKey.set(state.currentPosition)
+//
+//    val posLabel = positionLabel(targetPos)
+//    log.info(s"PactHcd : Reached $posLabel (${state.currentPosition} mm)")
+//
+//    // Publish arrival status event
+//    publishStatusEvent(posLabel, "Completed")
+//
+//    // Publish pactPushPullEvent when OUT is reached after push or pull
+//    // This is the authoritative signal that a physical grating transfer has completed.
+//    // The Assembly subscribes to this and sends updateState to lgmHcd and rgripHcd.
+//    val movingToOUT = math.abs(targetPos - OUT) <= EPSILON
+//    if (movingToOUT && (operation == "push" || operation == "pull")) {
+//      log.info(s"PactHcd : Publishing pactPushPullEvent (operation=$operation) – transfer confirmed")
+//      publishPushPullEvent(operation)
+//    }
+//
+//    Completed(runId)
+//  }
 
   private def onMove(runId: Id, setup: Setup): SubmitResponse = {
     val targetPos = setup(PactInfo.targetPositionKey).head
-    val fromPos   = state.currentPosition
 
-    val operation = setup.get(PactInfo.operationKey).map(_.head).getOrElse("idle")
-
-    log.info(s"PactHcd : Moving $fromPos mm → $targetPos mm")
-
-    if (math.abs(fromPos - targetPos) <= EPSILON) {
-      log.info(s"PactHcd : Already at target $targetPos mm")
-      publishStatusEvent(positionLabel(targetPos), "Completed")
-      return Completed(runId)
-    }
+    val operation = setup(PactInfo.operationKey).head
 
     state = state.copy(operation = operation)
 
-    // Execute motion
-    moveActuatorTo(targetPos)
-    state = state.copy(currentPosition = targetPos)
-    PactInfo.currentPosition = PactInfo.currentPositionKey.set(state.currentPosition)
+    log.info("pact hcd moving to target position ")
+    executePushPull(operation)
+    Completed(runId)
+  }
 
-    val posLabel = positionLabel(targetPos)
-    log.info(s"PactHcd : Reached $posLabel (${state.currentPosition} mm)")
+  // pushpull execution
+  private def executePushPull(operation: String): Unit = {
 
-    // Publish arrival status event
-    publishStatusEvent(posLabel, "Completed")
+    // Move actuator from OUT -> IN
+    moveActuatorTo(IN)
 
-    // Publish pactPushPullEvent when OUT is reached after push or pull
-    // This is the authoritative signal that a physical grating transfer has completed.
-    // The Assembly subscribes to this and sends updateState to lgmHcd and rgripHcd.
-    val movingToOUT = math.abs(targetPos - OUT) <= EPSILON
-    if (movingToOUT && (operation == "push" || operation == "pull")) {
-      log.info(s"PactHcd : Publishing pactPushPullEvent (operation=$operation) – transfer confirmed")
+    // Push transfer completes at IN
+    if (operation == "push") {
+      publishPushPullEvent(operation)
+    }
+    publishStatusEvent("IN", "Completed")
+
+    // Move actuator from IN -> OUTimport csw.command.client.messages.SubmitResponse
+    moveActuatorTo(OUT)
+
+    // Pull transfer completes at OUT
+    if (operation == "pull") {
       publishPushPullEvent(operation)
     }
 
-    Completed(runId)
+    // Always publish final status after movement
+    publishStatusEvent("OUT", "Completed")
   }
 
   // ── Actuator motion ─────────────────────────────────────────────────────────
 
   private def moveActuatorTo(targetPos: Double): Unit = {
+
+    if (state.currentPosition == targetPos) {
+      log.info(s"pact hcd already in target position = $targetPos")
+      return
+    }
     val delay = 100                        // ms
     val step  = PactInfo.movementStep.head // 50 mm
 
@@ -245,8 +319,8 @@ class PacthcdHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswContex
 
   // ── Event helpers ────────────────────────────────────────────────────────────
 
-  private def positionLabel(pos: Double): String =
-    if (math.abs(pos - IN) <= EPSILON) "IN" else "OUT"
+//  private def positionLabel(pos: Double): String =
+//    if (math.abs(pos - IN) <= EPSILON) "IN" else "OUT"
 
   private def publishStatusEvent(stage: String, status: String): Unit = {
     log.info(s"Publishing with prefix = ${componentInfo.prefix}")

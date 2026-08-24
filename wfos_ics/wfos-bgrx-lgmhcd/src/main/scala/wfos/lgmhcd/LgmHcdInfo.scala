@@ -102,4 +102,9 @@ object LgmInfo {
   val messageKey: Key[String]                 = KeyType.StringKey.make("message")
 
   val obsId: ObsId = ObsId("2023A-001-123")
+
+  def targetMagazinePosition(bgid: String): Double = {
+    val slotIndex = bgidToIndex(bgid)
+    gratingExchangePosition.head - gratingLinearDistance(slotIndex)
+  }
 }

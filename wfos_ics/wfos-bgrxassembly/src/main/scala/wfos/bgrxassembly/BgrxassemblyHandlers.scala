@@ -38,12 +38,19 @@ import csw.params.events.{EventKey, EventName, Event, SystemEvent}
 import wfos.bgrxassembly.TelemetryManager
 import wfos.bgrxassembly.AlarmManager
 import wfos.bgrxassembly.configuration.rgrip.RGripLookupService
-import wfos.bgrxassembly.BgrxValidator
 import org.apache.pekko.util.Timeout
 import scala.concurrent.duration._
 import scala.concurrent.Await
 import wfos.bgrxassembly.SequenceType
 import wfos.bgrxassembly.Step
+import wfos.bgrxassembly.command.BgrxRecovery
+import wfos.bgrxassembly.command.BgrxCommandBuilder
+import wfos.bgrxassembly.command.BgrxValidator
+import wfos.bgrxassembly.models.ValidationMessage
+import wfos.bgrxassembly.models.ValidationMessage.*
+import wfos.bgrxassembly.models.BarrierMode
+import wfos.bgrxassembly.models.BarrierMode.*
+import wfos.bgrxassembly.models.{SequenceContext, SequenceState}
 import Step.*
 import wfos.bgrxassembly.api.{AssemblyApi, BgrxApiService, BgrxRoutes, BgrxHttpServer}
 
@@ -60,6 +67,17 @@ class BgrxassemblyHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswC
   private var lgripHcdCS: Option[CommandService] = None
   private var lgmHcdCS: Option[CommandService]   = None
   private var pactHcdCS: Option[CommandService]  = None
+
+  // variables used when command response and  status event completed
+  private var currentRunId: Option[Id] = None
+  // from recovery and in assembly
+  private var completedStep: Option[Step] = None
+  // updated from temementy manager when status events completion
+  private var stateUpdatedStep: Option[Step] = None
+
+  // sequence execution context variables used to check current step,sequence and other
+  // information about the sequence execution across the assembly
+  private val sequenceState = new SequenceState()
 
   private val rgripHcd: RgripHcd = new RgripHcd()
 
@@ -107,17 +125,20 @@ class BgrxassemblyHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswC
     new TelemetryManager(
       loggerFactory,
       assemblyState,
-      () => isSequenceRunning,
-      () => isCurrentStepValid,
-      () => currentStep,
+//      () => isSequenceRunning,
+//      () => isCurrentStepValid,
+//      () => currentStep,
+      sequenceState,
       publishGratingTransferEvent,
       completeReturnTransfer,
-      completePickupTransfer
+      completePickupTransfer,
+      onStateUpdateCompleted
     )
 
   private val alarmManger = new AlarmManager()
 
   private val bgrxValidator = new BgrxValidator(loggerFactory)
+  private val bgrxrecovery  = new BgrxRecovery(loggerFactory, obsId, resolveAndSubmit)
 
   // spawning telementry actor
   private val telemetryEventActor: ActorRef[Event] =
@@ -129,41 +150,37 @@ class BgrxassemblyHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswC
   // =====================================================
   // 1. Sequence Types
   // =====================================================
-
+//SequenceType.scala
   // =====================================================
   // 2. Sequence State
   // =====================================================
-  private var sequenceRunning: Boolean              = false
-  private var currentSequence: Option[SequenceType] = None
-  private var currentStepIndex: Int                 = -1
+//  private var sequenceRunning: Boolean              = false
+//  private var currentSequence: Option[SequenceType] = None
+  private var currentStepIndex: Int = -1
 
-  private def isCurrentStepValid: Boolean = {
-    if (currentSequence.isEmpty)
-      return false
+  // remove this  isCurrentStepValid
+//  private def isCurrentStepValid: Boolean = {
+//    if (currentSequence.isEmpty)
+//      return false
+//    val sequence = getSequence(currentSequence.get)
+//    currentStepIndex >= 0 && currentStepIndex < sequence.length
+//  }
 
-    val sequence = getSequence(currentSequence.get)
-
-    currentStepIndex >= 0 && currentStepIndex < sequence.length
-  }
-
-  def isSequenceRunning: Boolean =
-    sequenceRunning
+  // def isSequenceRunning: Boolean = sequenceRunning
 
 //  private def currentStep: Step =
 //    getSequence(currentSequence.get)(currentStepIndex)
 
-  private def currentStep: Option[Step] = {
-
-    if (currentSequence.isEmpty)
-      return None
-
-    val sequence = getSequence(currentSequence.get)
-
-    if (currentStepIndex < 0 || currentStepIndex >= sequence.length)
-      return None
-
-    Some(sequence(currentStepIndex))
-  }
+  // remove this currentStep
+//  private def currentStep: Option[Step] = {
+//    if (currentSequence.isEmpty)
+//      return None
+//    val sequence = getSequence(currentSequence.get)
+//    if (currentStepIndex < 0 || currentStepIndex >= sequence.length)
+//      return None
+//
+//    Some(sequence(currentStepIndex))
+//  }
   // =====================================================
   // 3. Sequence Definitions
   // =====================================================
@@ -191,16 +208,24 @@ class BgrxassemblyHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswC
       case SequenceType.PICKUP   => pickupSequence
       case SequenceType.EXCHANGE => exchangeSequence
     }
-
+//execution enegine
   private def executeCurrentStep(runId: Id): Unit = {
 
-    val sequence = getSequence(currentSequence.get)
+    val sequence = getSequence(sequenceState.context.currentSequence.get)
+    log.info(s"Sequence = ${sequenceState.context.currentSequence}")
+    log.info(s"Index = $currentStepIndex")
 
     // Check whether the sequence has completed
     if (currentStepIndex < 0 || currentStepIndex >= sequence.length) {
-      log.info(s"$currentSequence sequence completed")
-      sequenceRunning = false
-      currentSequence = None
+      log.info(s"${sequenceState.context.currentSequence} sequence completed successfully")
+      sequenceState.context = sequenceState.context.copy(
+        currentSequence = None,
+        currentStep = None,
+        expectedTelemetryStep = None,
+        isSequenceRunning = false,
+        isCurrentStepValid = false,
+        runId = None
+      )
       currentStepIndex = -1
       return
     }
@@ -208,24 +233,48 @@ class BgrxassemblyHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswC
     val step = sequence(currentStepIndex)
 
     if (
-      !bgrxValidator.validateCurrentStep(
-        currentSequence.get,
-        step,
-        assemblyState
-      )
+      step == Step.PACT &&
+      (sequenceState.context.currentSequence.contains(SequenceType.RETURN) ||
+        sequenceState.context.currentSequence.contains(SequenceType.PICKUP))
     ) {
-      recoverCurrentStep(runId, step)
-      return
+      sequenceState.context = sequenceState.context.copy(
+        requiredTelemetrySteps = Set(
+          Step.PACT,
+          Step.RGRIP,
+          Step.LGM
+        ),
+        completedTelemetrySteps = Set.empty
+      )
+    }
+
+    val validationResult =
+      bgrxValidator.validateCurrentStep(sequenceState.context.currentSequence.get, step, assemblyState)
+
+    validationResult match {
+      case ValidationPassed =>
+      // Continue normally
+      case failure =>
+        val recoveryStep = getRecoveryTelemetryStep(failure)
+        sequenceState.context = sequenceState.context.copy(
+          barrierMode = Recovery,
+          expectedTelemetryStep = Some(recoveryStep)
+        )
+        bgrxrecovery.recover(runId, step, failure) { case (completedStep, _: Completed) =>
+          this.completedStep = Some(completedStep)
+          tryAdvance()
+        }
+        return
     }
 
     val command =
       BgrxCommandBuilder.buildCommand(
-        currentSequence.get,
+        sequenceState.context.currentSequence.get,
         step,
         sourcePrefix,
         obsId,
         assemblyState
       )
+    sequenceState.context = sequenceState.context.copy(barrierMode = Normal, expectedTelemetryStep = Some(step))
 
     sendCurrentStep(runId, step, command)
   }
@@ -240,120 +289,112 @@ class BgrxassemblyHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswC
     }
 
     resolveAndSubmit(hcdName, command, runId) { case _: Completed =>
-      currentStepIndex += 1
-      executeCurrentStep(runId)
+      completedStep = Some(step)
+      tryAdvance()
+
+//      currentStepIndex += 1
+//      executeCurrentStep(runId)
+
     }
   }
 
   // api entry point
   def executeSequence(sequence: SequenceType): Unit = {
-    startExecution(
-      Id("ui"),
-      sequence
-    )
+    startExecution(Id("ui"), sequence)
   }
 
-  private def startExecution(
-      runId: Id,
-      sequence: SequenceType
-  ): Unit = {
-
-    sequenceRunning = true
-    currentSequence = Some(sequence)
+  private def startExecution(runId: Id, sequence: SequenceType): Unit = {
+    // sequenceRunning = true
+    //  currentSequence = Some(sequence)
     currentStepIndex = 0
+    //  currentRunId = Some(runId)
+
+    // sequence context variables
+    sequenceState.context = sequenceState.context.copy(
+      currentSequence = Some(sequence),
+      currentStep = Some(getSequence(sequence).head),
+      expectedTelemetryStep = Some(getSequence(sequence).head),
+      barrierMode = Normal,
+      runId = Some(runId),
+      targetGratingId = None,
+      isSequenceRunning = true,
+      isCurrentStepValid = true
+    )
 
     executeCurrentStep(runId)
   }
 
-  private def recoverCurrentStep(
-      runId: Id,
-      step: Step
-  ): Unit = {
+  // callback function for telementrymanager
+  private def onStateUpdateCompleted(step: Step): Unit = {
+    stateUpdatedStep = Some(step)
+    tryAdvance()
+  }
 
-    currentSequence.get match {
+  private def tryAdvance(): Unit = {
+    log.info(s"completed step is = $completedStep  and state updated step is $stateUpdatedStep")
 
-      // =====================================================
-      // HOME
-      // =====================================================
+    val hasTelemetryBarrier =
+      sequenceState.context.requiredTelemetrySteps.nonEmpty
 
-      case SequenceType.HOME =>
-        step match {
+    val telemetryComplete =
+      sequenceState.context.requiredTelemetrySteps
+        .subsetOf(sequenceState.context.completedTelemetrySteps)
 
-          case Step.PACT =>
-            log.info("HOME Recovery: PACT is the first step. No recovery required.")
+    val stepComplete =
+      if (hasTelemetryBarrier) {
+        completedStep.isDefined && telemetryComplete
+      }
+      else {
+        completedStep == stateUpdatedStep
+      }
 
-          case Step.LGM =>
-            log.info("HOME Recovery: Validation failed for LGM. Recover by moving PACT to HOME, then retry LGM.")
+    if (stepComplete) {
+      completedStep = None
+      stateUpdatedStep = None
+      sequenceState.context.barrierMode match {
+        case Normal =>
+          sequenceState.context = sequenceState.context.copy(
+            barrierMode = NotSet,
+            requiredTelemetrySteps = Set.empty,
+            completedTelemetrySteps = Set.empty
+          )
+          currentStepIndex += 1
+          val sequence = getSequence(sequenceState.context.currentSequence.get)
 
-          case Step.LGRIP =>
-            log.info("HOME Recovery: Validation failed for LGRIP. Recover by moving LGM to HOME, then retry LGRIP.")
+          if (currentStepIndex < sequence.length) {
+            sequenceState.context = sequenceState.context.copy(
+              currentStep = Some(sequence(currentStepIndex))
+            )
+          }
+          executeCurrentStep(sequenceState.context.runId.get)
 
-          case Step.RGRIP =>
-            log.info("HOME Recovery: Validation failed for RGRIP. Recover by moving LGRIP to HOME, then retry RGRIP.")
-        }
+        case Recovery =>
+          sequenceState.context = sequenceState.context.copy(barrierMode = NotSet)
+          executeCurrentStep(sequenceState.context.runId.get)
 
-      // =====================================================
-      // PICKUP
-      // =====================================================
-
-      case SequenceType.PICKUP =>
-        step match {
-
-          case Step.RGRIP =>
-          // TODO
-
-          case Step.LGRIP =>
-          // TODO
-
-          case Step.LGM =>
-          // TODO
-
-          case Step.PACT =>
-          // TODO
-        }
-
-      // =====================================================
-      // RETURN
-      // =====================================================
-
-      case SequenceType.RETURN =>
-        step match {
-
-          case Step.RGRIP =>
-          // TODO
-
-          case Step.LGRIP =>
-          // TODO
-
-          case Step.LGM =>
-          // TODO
-
-          case Step.PACT =>
-          // TODO
-        }
-
-      // =====================================================
-      // EXCHANGE
-      // =====================================================
-
-      case SequenceType.EXCHANGE =>
-        step match {
-
-          case Step.RGRIP =>
-          // TODO
-
-          case Step.LGRIP =>
-          // TODO
-
-          case Step.LGM =>
-          // TODO
-
-          case Step.PACT =>
-          // TODO
-        }
+        case NotSet =>
+          log.error("Barrier mode was not set.")
+      }
     }
   }
 
+  private def getRecoveryTelemetryStep(failure: ValidationMessage): Step =
+    failure match {
+      case RgripHasNoGrating            => Step.RGRIP
+      case RgripIsNotAtExchange         => Step.RGRIP
+      case LgripNotInHome               => Step.LGRIP
+      case LgripNotInExchange           => Step.LGRIP
+      case LgmNotInHome                 => Step.LGM
+      case LgmNotAtTarget               => Step.LGM
+      case LgmMySlotNotMatchInGratingId => Step.LGM
+      case LgmEmptySlotNotAvailable     => Step.LGM
+      case PactNotIn                    => Step.PACT
+      case PactNotOut                   => Step.PACT
+      case ValidationPassed =>
+        throw new IllegalArgumentException(
+          "ValidationPassed cannot be used as a recovery failure"
+        )
+    }
   private def initializeClass(): Unit = {
     telemetryManager()
     alarmManger()
@@ -520,6 +561,19 @@ class BgrxassemblyHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswC
               case Left(error) => Invalid(runId, error)
             }
 
+          case CommandName("exchange") =>
+            // Validate bgid, targetAngle, cw, and angle-bgid pairing
+            rgripHcd.validateParameters(setup) match {
+              case Right(_)    => Accepted(runId)
+              case Left(error) => Invalid(runId, error)
+            }
+
+          case CommandName("return") =>
+            log.info(" ################### assembly validating return  command ##########################")
+            // return  is always valid – each HCD decides autonomously whether it
+            // needs to move. No parameters are required.
+            Accepted(runId)
+
           case CommandName("gratingReturn") =>
             // Only pre-condition: rgrip must currently be holding a grating.
             // No need to validate targetAngle/cw – those are not supplied for return.
@@ -530,6 +584,7 @@ class BgrxassemblyHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswC
               Accepted(runId)
 
           case CommandName("homing") =>
+            log.info(" ################### assembly validating homing command ##########################")
             // Homing is always valid – each HCD decides autonomously whether it
             // needs to move. No parameters are required.
             Accepted(runId)
@@ -628,10 +683,10 @@ class BgrxassemblyHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswC
         telemetryEventActor
       )
 
-//    subscriber.subscribeActorRef(
-//      Set(EventKey(Prefix("wfos.bgrxAssembly.pacthcd"), EventName("pactPushPullEvent"))),
-//      telemetryEventActor
-//    )
+    subscriber.subscribeActorRef(
+      Set(EventKey(Prefix("wfos.bgrxAssembly.pacthcd"), EventName("pactPushPullEvent"))),
+      telemetryEventActor
+    )
   }
 
   private def publishGratingTransferEvent(operation: String, bgid: String): Unit = {
@@ -1136,9 +1191,7 @@ class BgrxassemblyHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswC
 
     cs.submit(command).onComplete {
       case Success(response) =>
-        log.info(
-          s"[Completed] response=$response currentAngle=${assemblyState.rgripState.currentAngle}"
-        )
+        log.info(s"[Completed] response=$response")
         if (onResponse.isDefinedAt(response)) {
           onResponse(response)
         }
@@ -1178,9 +1231,7 @@ class BgrxassemblyHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswC
     onPickupTransferComplete.foreach { continuation =>
       onPickupTransferComplete = None
 
-      log.info(
-        "Assembly: gratingTransfer(push) confirmed – executing pickup continuation"
-      )
+      log.info("Assembly: gratingTransfer(push) confirmed – executing pickup continuation")
 
       ctx.system.scheduler.scheduleOnce(
         Duration.ofMillis(10),
