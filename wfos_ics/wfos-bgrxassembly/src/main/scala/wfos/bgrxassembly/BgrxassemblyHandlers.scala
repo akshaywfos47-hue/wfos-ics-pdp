@@ -50,7 +50,7 @@ import wfos.bgrxassembly.models.ValidationMessage
 import wfos.bgrxassembly.models.ValidationMessage.*
 import wfos.bgrxassembly.models.BarrierMode
 import wfos.bgrxassembly.models.BarrierMode.*
-import wfos.bgrxassembly.models.{SequenceContext, SequenceState}
+import wfos.bgrxassembly.models.{SequenceContext, SequenceState, SequenceCommandRequest}
 import Step.*
 import wfos.bgrxassembly.api.{AssemblyApi, BgrxApiService, BgrxRoutes, BgrxHttpServer}
 
@@ -218,6 +218,7 @@ class BgrxassemblyHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswC
     // Check whether the sequence has completed
     if (currentStepIndex < 0 || currentStepIndex >= sequence.length) {
       log.info(s"${sequenceState.context.currentSequence} sequence completed successfully")
+      logAllHcdStates("sequence completion")
       sequenceState.context = sequenceState.context.copy(
         currentSequence = None,
         currentStep = None,
@@ -298,18 +299,51 @@ class BgrxassemblyHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswC
     }
   }
 
+  private def buildInitialCommand(request: SequenceCommandRequest): Setup = {
+
+    request.sequence match {
+      case SequenceType.HOME =>
+        Setup(sourcePrefix, CommandName("homing"), Some(obsId))
+
+      case SequenceType.RETURN =>
+        Setup(sourcePrefix, CommandName("return"), Some(obsId))
+
+      case SequenceType.PICKUP =>
+        Setup(sourcePrefix, CommandName("pickup"), Some(obsId))
+          .madd(
+            RgripInfo.gratingModeKey.set(request.requestedBgid.get),
+            RgripInfo.targetAngleKey.set(request.observationAngle.get),
+            RgripInfo.cwKey.set(request.cw.get)
+          )
+
+      case SequenceType.EXCHANGE =>
+        Setup(sourcePrefix, CommandName("exchange"), Some(obsId))
+          .madd(
+            RgripInfo.gratingModeKey.set(request.requestedBgid.get),
+            RgripInfo.targetAngleKey.set(request.observationAngle.get),
+            RgripInfo.cwKey.set(request.cw.get)
+          )
+    }
+  }
+
   // api entry point
-  def executeSequence(sequence: SequenceType): Unit = {
-    startExecution(Id("ui"), sequence)
+  def executeSequence(request: SequenceCommandRequest): Unit = {
+    val runId          = Id("ui")
+    val command: Setup = buildInitialCommand(request)
+
+    validateCommand(runId, command) match {
+      case Accepted(_) =>
+        onSubmit(runId, command)
+
+      case Invalid(_, error) =>
+        log.error(s"Command validation failed: ${error.reason}")
+    }
   }
 
   private def startExecution(runId: Id, sequence: SequenceType): Unit = {
-    // sequenceRunning = true
-    //  currentSequence = Some(sequence)
+    logAllHcdStates("sequence start ")
     currentStepIndex = 0
-    //  currentRunId = Some(runId)
 
-    // sequence context variables
     sequenceState.context = sequenceState.context.copy(
       currentSequence = Some(sequence),
       currentStep = Some(getSequence(sequence).head),
@@ -403,8 +437,7 @@ class BgrxassemblyHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswC
     apiService = new BgrxApiService(this)
     routes = new BgrxRoutes(apiService)
 
-    val httpServer =
-      new BgrxHttpServer(ctx.system, routes)
+    val httpServer = new BgrxHttpServer(ctx.system, routes)
 
     httpServer.start()
   }
@@ -599,15 +632,25 @@ class BgrxassemblyHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswC
 
   // ── Submit ──────────────────────────────────────────────────────────────────
   override def onSubmit(runId: Id, controlCommand: ControlCommand): SubmitResponse = {
-    log.info(s"Bgrx Assembly : handling command $runId")
+
+    log.info(s"========== onSubmit called: runId=$runId, command=$controlCommand ==========")
 
     controlCommand match {
       case setup: Setup =>
         setup.commandName match {
-          case CommandName("pickup")        => onSetup(runId, setup)
-          case CommandName("gratingReturn") => onGratingReturn(runId, setup)
-          case CommandName("homing")        => onHoming(runId)
-          case _                            => Invalid(runId, UnsupportedCommandIssue("Unsupported command"))
+          case CommandName("pickup") =>
+            startExecution(runId, SequenceType.PICKUP)
+            Started(runId)
+
+          case CommandName("return") =>
+            startExecution(runId, SequenceType.RETURN)
+            Started(runId)
+
+          case CommandName("homing") =>
+            startExecution(runId, SequenceType.HOME)
+            Started(runId)
+
+          case _ => Invalid(runId, UnsupportedCommandIssue("Unsupported command"))
         }
       case _: Observe => Invalid(runId, WrongCommandTypeIssue("Observe commands not supported"))
     }
